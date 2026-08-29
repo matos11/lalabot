@@ -3,8 +3,8 @@
 
 // Environment Configuration (Render Environment Variables with hardcoded fallbacks)
 define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAHDAoOxTRw-0xBLXJGY8rIaRtVBG3LnKxM');
-define('GAME_URL', getenv('GAME_URL') ?: 'https://ydmbot-h4po.vercel.app/');
-define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://ydm-bingo-realtime-default-rtdb.firebaseio.com/');
+define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
+define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com');
 
 define('URL_USERS', BASE_FIREBASE . 'users/');
 define('URL_STATES', BASE_FIREBASE . 'states/');
