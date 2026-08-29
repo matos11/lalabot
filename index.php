@@ -155,43 +155,45 @@ if (isset($update["message"])) {
     $message = $update["message"];
     $chat_id = $message["chat"]["id"];
     $telegram_id = $message["from"]["id"];
-    $username = $message["from"]["username"] ?? "NoUsername";
+    $username = $message["from"]["username"] ?? "";
     $first_name = $message["from"]["first_name"] ?? "User";
+    $last_name = $message["from"]["last_name"] ?? "";
     $text = trim($message["text"] ?? "");
 
-    // Handle Contact Sharing -> Write to both users and userone node
+    // Handle Contact Sharing -> Create user with the schema and initial 10 ETB
     if (isset($message["contact"])) {
-        $phone = $message["contact"]["phone_number"];
+        $phone = (string)$message["contact"]["phone_number"];
         
-        // 1. Update/create user in users node
-        $user = firebaseGet(URL_USERS . $telegram_id . ".json") ?? [];
-        $user["telegram_id"] = $telegram_id;
-        $user["first_name"] = $first_name;
-        $user["username"] = $username;
-        $user["phone"] = $phone;
-        if (!isset($user["balance"])) $user["balance"] = 0.0;
-        if (!isset($user["created_at"])) $user["created_at"] = time();
-        $user["updated_at"] = time();
+        $photo_url = "https://t.me/i/userpic/320/" . (!empty($username) ? $username : $telegram_id) . ".svg";
         
-        firebasePut(URL_USERS . $telegram_id . ".json", $user);
+        $existing_user = firebaseGet(URL_USERS . $telegram_id . ".json");
+        
+        // If user already exists in DB keep their current balance, otherwise grant 10 ETB initial balance
+        $balance = $existing_user ? floatval($existing_user["balance"] ?? 10.0) : 10.0;
+        $created_at = $existing_user["created_at"] ?? time();
 
-        // 2. Create/update in userone node
-        $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $phone);
-        $userone_key = !empty($clean_phone) ? $clean_phone : strval($telegram_id);
-        
-        $userone_payload = [
-            "telegram_id" => $telegram_id,
-            "phone" => $phone,
-            "name" => $first_name,
+        $user_payload = [
+            "balance" => $balance,
+            "created_at" => (int)$created_at,
             "first_name" => $first_name,
-            "username" => $username,
-            "balance" => floatval($user["balance"] ?? 0.0),
-            "created_at" => time()
+            "lastSeen" => intval(microtime(true) * 1000),
+            "last_name" => $last_name,
+            "phone" => $phone,
+            "photo_url" => $photo_url,
+            "telegram_id" => (int)$telegram_id,
+            "username" => ($username === "NoUsername" ? "" : $username)
         ];
         
-        firebasePut(URL_USERONE . $userone_key . ".json", $userone_payload);
+        // 1. Save to users/{telegram_id}
+        firebasePut(URL_USERS . $telegram_id . ".json", $user_payload);
 
-        sendMessage($chat_id, "✅ <b>ስልክ ቁጥርዎ በተሳካ ሁኔታ ተመዝግቧል!</b>", ["remove_keyboard" => true]);
+        // 2. Save to userone/{phone}
+        $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $phone);
+        $userone_key = !empty($clean_phone) ? $clean_phone : (string)$telegram_id;
+        
+        firebasePut(URL_USERONE . $userone_key . ".json", $user_payload);
+
+        sendMessage($chat_id, "✅ <b>ስልክ ቁጥርዎ በተሳካ ሁኔታ ተመዝግቧል! 10 ETB ቦነስ ተጨምሯል::</b>", ["remove_keyboard" => true]);
         sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         exit;
     }
@@ -206,12 +208,18 @@ if (isset($update["message"])) {
 
         $user = firebaseGet(URL_USERS . $telegram_id . ".json");
         if (!$user) {
+            $photo_url = "https://t.me/i/userpic/320/" . (!empty($username) ? $username : $telegram_id) . ".svg";
+            
             $user_payload = [
-                "telegram_id" => $telegram_id, 
-                "first_name" => $first_name, 
-                "username" => $username, 
-                "balance" => 0.0, 
-                "created_at" => time()
+                "balance" => 10.0,
+                "created_at" => time(),
+                "first_name" => $first_name,
+                "lastSeen" => intval(microtime(true) * 1000),
+                "last_name" => $last_name,
+                "phone" => "",
+                "photo_url" => $photo_url,
+                "telegram_id" => (int)$telegram_id,
+                "username" => ($username === "NoUsername" ? "" : $username)
             ];
             firebasePut(URL_USERS . $telegram_id . ".json", $user_payload);
             
@@ -223,7 +231,7 @@ if (isset($update["message"])) {
                     sendMessage($referrer_id, "🎁 <b>+5.00 ETB ቦነስ በ LALA BINGO ገብቶልዎታል!</b>");
                 }
             }
-            sendMessage($chat_id, "👋 <b>እንኳን ወደ LALA BINGO በደህና መጡ! 🇯🇲🎲</b>", ["keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ", "request_contact" => true]]], "resize_keyboard" => true, "one_time_keyboard" => true]);
+            sendMessage($chat_id, "👋 <b>እንኳን ወደ LALA BINGO በደህና መጡ! 🇯🇲🎲</b>\n\nለመመዝገብ እና የ <b>10 ETB</b> ቦነስ ለማግኘት ከታች ያለውን ቁልፍ ይጫኑ::", ["keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ", "request_contact" => true]]], "resize_keyboard" => true, "one_time_keyboard" => true]);
         } else {
             sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         }
@@ -281,14 +289,16 @@ if (isset($update["message"])) {
 
         $user = firebaseGet(URL_USERS . $telegram_id . ".json");
         $user["balance"] = floatval($user["balance"] ?? 0) + $system_amount;
+        $user["lastSeen"] = intval(microtime(true) * 1000);
         firebasePut(URL_USERS . $telegram_id . ".json", $user);
 
-        // Keep userone node in sync if phone exists
+        // Keep userone node in sync
         if (!empty($user['phone'])) {
-            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $user['phone']);
+            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', (string)$user['phone']);
             $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
             if ($userone) {
                 $userone["balance"] = $user["balance"];
+                $userone["lastSeen"] = $user["lastSeen"];
                 firebasePut(URL_USERONE . $clean_phone . ".json", $userone);
             }
         }
@@ -360,14 +370,16 @@ if (isset($update["message"])) {
         }
 
         $user["balance"] = $current_balance - $withdraw_amount;
+        $user["lastSeen"] = intval(microtime(true) * 1000);
         firebasePut(URL_USERS . $telegram_id . ".json", $user);
 
-        // Keep userone node in sync if phone exists
+        // Keep userone node in sync
         if (!empty($user['phone'])) {
-            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $user['phone']);
+            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', (string)$user['phone']);
             $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
             if ($userone) {
                 $userone["balance"] = $user["balance"];
+                $userone["lastSeen"] = $user["lastSeen"];
                 firebasePut(URL_USERONE . $clean_phone . ".json", $userone);
             }
         }
@@ -377,8 +389,8 @@ if (isset($update["message"])) {
         $withdrawal_id = "WDR" . time() . rand(10, 99);
         $withdrawal_payload = [
             "id" => $withdrawal_id,
-            "telegram_id" => $telegram_id,
-            "username" => $username,
+            "telegram_id" => (int)$telegram_id,
+            "username" => ($username === "NoUsername" ? "" : $username),
             "first_name" => $user["first_name"] ?? "User",
             "phone" => $user["phone"] ?? "Not Provided",
             "amount" => $withdraw_amount,
@@ -409,7 +421,7 @@ function getDashboardText($telegram_id) {
     $balance = floatval($user["balance"] ?? 0.0);
     return "🇯🇲 <b>LALA BINGO ዋና ማውጫ</b>\n\n"
          . "👤 ተጫዋች: <b>" . htmlspecialchars($user['first_name'] ?? 'User') . "</b>\n"
-         . "📱 ስልክ: <code>" . ($user['phone'] ?? 'ያልተመዘገበ ⚠️') . "</code>\n"
+         . "📱 ስልክ: <code>" . (!empty($user['phone']) ? $user['phone'] : 'ያልተመዘገበ ⚠️') . "</code>\n"
          . "💰 ቀሪ ሂሳብ: <b>ETB " . number_format($balance, 2) . "</b>\n\n"
          . "ከታች ያሉትን አማራጮች በመጠቀም አካውንትዎን ያስተዳድሩ ወይም ወደ ጨዋታው ይግቡ! ✨";
 }
