@@ -4,9 +4,10 @@
 // Environment Configuration (Render Environment Variables with hardcoded fallbacks)
 define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAHDAoOxTRw-0xBLXJGY8rIaRtVBG3LnKxM');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
-define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com');
+define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com/');
 
 define('URL_USERS', BASE_FIREBASE . 'users/');
+define('URL_USERONE', BASE_FIREBASE . 'userone/');
 define('URL_STATES', BASE_FIREBASE . 'states/');
 define('URL_DEPOSITS', BASE_FIREBASE . 'deposits/');
 define('URL_WITHDRAWALS', BASE_FIREBASE . 'withdrawals/');
@@ -155,15 +156,41 @@ if (isset($update["message"])) {
     $chat_id = $message["chat"]["id"];
     $telegram_id = $message["from"]["id"];
     $username = $message["from"]["username"] ?? "NoUsername";
+    $first_name = $message["from"]["first_name"] ?? "User";
     $text = trim($message["text"] ?? "");
 
+    // Handle Contact Sharing -> Write to both users and userone node
     if (isset($message["contact"])) {
         $phone = $message["contact"]["phone_number"];
-        $user = firebaseGet(URL_USERS . $telegram_id . ".json");
-        if ($user) { 
-            $user["phone"] = $phone; 
-            firebasePut(URL_USERS . $telegram_id . ".json", $user); 
-        }
+        
+        // 1. Update/create user in users node
+        $user = firebaseGet(URL_USERS . $telegram_id . ".json") ?? [];
+        $user["telegram_id"] = $telegram_id;
+        $user["first_name"] = $first_name;
+        $user["username"] = $username;
+        $user["phone"] = $phone;
+        if (!isset($user["balance"])) $user["balance"] = 0.0;
+        if (!isset($user["created_at"])) $user["created_at"] = time();
+        $user["updated_at"] = time();
+        
+        firebasePut(URL_USERS . $telegram_id . ".json", $user);
+
+        // 2. Create/update in userone node
+        $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $phone);
+        $userone_key = !empty($clean_phone) ? $clean_phone : strval($telegram_id);
+        
+        $userone_payload = [
+            "telegram_id" => $telegram_id,
+            "phone" => $phone,
+            "name" => $first_name,
+            "first_name" => $first_name,
+            "username" => $username,
+            "balance" => floatval($user["balance"] ?? 0.0),
+            "created_at" => time()
+        ];
+        
+        firebasePut(URL_USERONE . $userone_key . ".json", $userone_payload);
+
         sendMessage($chat_id, "✅ <b>ስልክ ቁጥርዎ በተሳካ ሁኔታ ተመዝግቧል!</b>", ["remove_keyboard" => true]);
         sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         exit;
@@ -181,7 +208,7 @@ if (isset($update["message"])) {
         if (!$user) {
             $user_payload = [
                 "telegram_id" => $telegram_id, 
-                "first_name" => $message["from"]["first_name"], 
+                "first_name" => $first_name, 
                 "username" => $username, 
                 "balance" => 0.0, 
                 "created_at" => time()
@@ -256,6 +283,16 @@ if (isset($update["message"])) {
         $user["balance"] = floatval($user["balance"] ?? 0) + $system_amount;
         firebasePut(URL_USERS . $telegram_id . ".json", $user);
 
+        // Keep userone node in sync if phone exists
+        if (!empty($user['phone'])) {
+            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $user['phone']);
+            $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
+            if ($userone) {
+                $userone["balance"] = $user["balance"];
+                firebasePut(URL_USERONE . $clean_phone . ".json", $userone);
+            }
+        }
+
         $tx_record["status"] = "processed";
         $tx_record["amount"] = $system_amount;
         $tx_record["claimed_by"] = $username;
@@ -324,6 +361,17 @@ if (isset($update["message"])) {
 
         $user["balance"] = $current_balance - $withdraw_amount;
         firebasePut(URL_USERS . $telegram_id . ".json", $user);
+
+        // Keep userone node in sync if phone exists
+        if (!empty($user['phone'])) {
+            $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $user['phone']);
+            $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
+            if ($userone) {
+                $userone["balance"] = $user["balance"];
+                firebasePut(URL_USERONE . $clean_phone . ".json", $userone);
+            }
+        }
+
         clearState($telegram_id);
 
         $withdrawal_id = "WDR" . time() . rand(10, 99);
@@ -393,11 +441,11 @@ function firebasePut($url, $data) {
 }
 
 function firebaseGet($url) { 
-    $ch = curl_init($url);
-    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    $ch = curl_init($url); 
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    $res = curl_exec($ch);
-    curl_close($ch);
+    $res = curl_exec($ch); 
+    curl_close($ch); 
     return $res ? json_decode($res, true) : null; 
 }
 
