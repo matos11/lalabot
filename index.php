@@ -33,12 +33,22 @@ if (isset($update["callback_query"])) {
     $username = $callback["from"]["username"] ?? "NoUsername";
 
     answerCallbackQuery($callback["id"]);
+
+    // Block unverified/unregistered users from interacting with dashboard callbacks
+    $user = findExistingAccount($telegram_id, $username);
+    if (!$user || empty($user['phone'])) {
+        sendMessage($chat_id, "⚠️ <b>መጀመሪያ ስልክ ቁጥርዎን በማጋራት መመዝገብ አለብዎት!</b>", [
+            "keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ (Share Contact)", "request_contact" => true]]],
+            "resize_keyboard" => true,
+            "one_time_keyboard" => true
+        ]);
+        exit;
+    }
     
     if ($callback_data === "menu_dashboard") {
         clearState($telegram_id);
         editMessageText($chat_id, $message_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
     } elseif ($callback_data === "menu_play") {
-        $user = findExistingAccount($telegram_id, $username);
         $balance = floatval($user["balance"] ?? 0);
         if ($balance <= 0) {
             $keyboard = ["inline_keyboard" => [[["text" => "💳 ብር አስገባ (Deposit)", "callback_data" => "menu_deposit"]], [["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
@@ -97,7 +107,6 @@ if (isset($update["callback_query"])) {
     
     // --- DASHBOARD MENUS ---
     elseif ($callback_data === "menu_balance") {
-        $user = findExistingAccount($telegram_id, $username);
         $balance = floatval($user["balance"] ?? 0.0);
         
         $all_deposits = firebaseGet(URL_DEPOSITS . '.json') ?? [];
@@ -160,9 +169,15 @@ if (isset($update["message"])) {
     $last_name = $message["from"]["last_name"] ?? "";
     $text = trim($message["text"] ?? "");
 
-    // Handle Contact Sharing -> Write/link database account
+    // ----------------------------------------------------
+    // CASE 1: Contact Sharing -> Finalize Registration
+    // ----------------------------------------------------
     if (isset($message["contact"])) {
         $phone = (string)$message["contact"]["phone_number"];
+        // Ensure standard phone format
+        if (!str_starts_with($phone, "+") && !str_starts_with($phone, "0")) {
+            $phone = "+" . $phone;
+        }
         $clean_phone = preg_replace('/[.#$[\]\/]/', '_', $phone);
         $photo_url = "https://t.me/i/userpic/320/" . (!empty($username) ? $username : $telegram_id) . ".svg";
         
@@ -182,16 +197,41 @@ if (isset($update["message"])) {
             "username" => ($username === "NoUsername" ? "" : $username)
         ];
         
+        // Save user to users and userone paths
         firebasePut(URL_USERS . $telegram_id . ".json", $user_payload);
         firebasePut(URL_USERONE . $clean_phone . ".json", $user_payload);
 
-        sendMessage($chat_id, "✅ <b>ስልክ ቁጥርዎ በተሳካ ሁኔታ ተመዝግቧል!</b>\n\n💰 ቀሪ ሂሳብ: <b>" . number_format($balance, 2) . " ETB</b>", ["remove_keyboard" => true]);
+        // Process referral bonus if registered via referral state
+        $state_data = firebaseGet(URL_STATES . $telegram_id . ".json");
+        if (is_array($state_data) && !empty($state_data['referrer_id'])) {
+            $ref_id = $state_data['referrer_id'];
+            if (strval($ref_id) !== strval($telegram_id)) {
+                $referrer = firebaseGet(URL_USERS . $ref_id . ".json");
+                if ($referrer) {
+                    $referrer["balance"] = floatval($referrer["balance"] ?? 0) + 5.00;
+                    firebasePut(URL_USERS . $ref_id . ".json", $referrer);
+                    sendMessage($ref_id, "🎁 <b>+5.00 ETB ቦነስ በ LALA BINGO ገብቶልዎታል! (ጓደኛዎ ተመዝግቧል)</b>");
+                }
+            }
+        }
+        clearState($telegram_id);
+
+        $welcome_success = "✅ <b>ምዝገባዎ በተሳካ ሁኔታ ተጠናቋል!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+                         . "👤 ስም: <b>" . htmlspecialchars($first_name . ($last_name ? " " . $last_name : "")) . "</b>\n"
+                         . "📱 ስልክ: <code>" . $phone . "</code>\n"
+                         . "🎁 የተበረከተ ቦነስ: <b>10.00 ETB</b>\n"
+                         . "💰 ጠቅላላ ቀሪ ሂሳብ: <b>" . number_format($balance, 2) . " ETB</b>\n"
+                         . "━━━━━━━━━━━━━━━━━━━━";
+
+        sendMessage($chat_id, $welcome_success, ["remove_keyboard" => true]);
         sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         exit;
     }
 
+    // ----------------------------------------------------
+    // CASE 2: /start Command Processing
+    // ----------------------------------------------------
     if (str_starts_with($text, "/start")) {
-        clearState($telegram_id);
         $referrer_id = null; 
         $parts = explode(" ", $text);
         if (count($parts) > 1 && is_numeric($parts[1])) { 
@@ -200,54 +240,38 @@ if (isset($update["message"])) {
 
         $existingUser = findExistingAccount($telegram_id, $username);
 
-        if ($existingUser) {
+        // User exists AND has already registered a phone number
+        if ($existingUser && !empty($existingUser['phone'])) {
+            clearState($telegram_id);
+            
             // Update lastSeen & sync current telegram_id
             $existingUser["lastSeen"] = intval(microtime(true) * 1000);
             $existingUser["telegram_id"] = (int)$telegram_id;
             firebasePut(URL_USERS . $telegram_id . ".json", $existingUser);
             
-            $phone_display = !empty($existingUser['phone']) ? $existingUser['phone'] : 'ያልተመዘገበ';
             $status_notify = "✅ <b>አካውንትዎ በዳታቤዝ ውስጥ ተገኝቷል!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                            . "👤 ስም: <b>" . htmlspecialchars($existingUser['first_name'] ?? $first_name) . "</b>\n"
-                           . "📱 ስልክ: <code>" . $phone_display . "</code>\n"
+                           . "📱 ስልክ: <code>" . $existingUser['phone'] . "</code>\n"
                            . "💰 ቀሪ ሂሳብ: <b>" . number_format(floatval($existingUser['balance'] ?? 0), 2) . " ETB</b>\n"
                            . "━━━━━━━━━━━━━━━━━━━━";
 
             sendMessage($chat_id, $status_notify, ["remove_keyboard" => true]);
             sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         } else {
-            // Unregistered user
-            $photo_url = "https://t.me/i/userpic/320/" . (!empty($username) ? $username : $telegram_id) . ".svg";
-            
-            $user_payload = [
-                "balance" => 10.0,
-                "created_at" => time(),
-                "first_name" => $first_name,
-                "lastSeen" => intval(microtime(true) * 1000),
-                "last_name" => $last_name,
-                "phone" => "",
-                "photo_url" => $photo_url,
-                "telegram_id" => (int)$telegram_id,
-                "username" => ($username === "NoUsername" ? "" : $username)
+            // New / Unregistered user: Demand phone sharing
+            $state_payload = [
+                "stage" => "waiting_contact",
+                "referrer_id" => $referrer_id
             ];
-            firebasePut(URL_USERS . $telegram_id . ".json", $user_payload);
-            
-            if ($referrer_id && strval($referrer_id) !== strval($telegram_id)) {
-                $referrer = firebaseGet(URL_USERS . $referrer_id . ".json");
-                if ($referrer) {
-                    $referrer["balance"] = floatval($referrer["balance"] ?? 0) + 5.00;
-                    firebasePut(URL_USERS . $referrer_id . ".json", $referrer);
-                    sendMessage($referrer_id, "🎁 <b>+5.00 ETB ቦነስ በ LALA BINGO ገብቶልዎታል!</b>");
-                }
-            }
+            firebasePut(URL_STATES . $telegram_id . ".json", $state_payload);
 
             $welcome_msg = "👋 <b>እንኳን ወደ LALA BINGO በደህና መጡ! 🇯🇲🎲</b>\n\n"
-                         . "ℹ️ <i>አካውንትዎ በዳታቤዝ ውስጥ አዲስ ነው::</i>\n"
-                         . "🎁 <b>10 ETB</b> ቦነስ ተጨምሮልዎታል!\n\n"
-                         . "መለያዎን ለማጠናቀቅ ከታች ያለውን ቁልፍ ተጭነው ስልክዎን ያጋሩ:";
+                         . "⚠️ <i>አካውንትዎ በዳታቤዝ ውስጥ አልተገኘም ወይም አልተመዘገበም::</i>\n\n"
+                         . "🎁 አሁኑኑ ሲመዘገቡ የ <b>10 ETB</b> ነፃ የመጫወቻ ቦነስ ያገኛሉ!\n\n"
+                         . "ለመመዝገብ ከታች ያለውን <b>'📱 ስልክ ቁጥርዎን ያጋሩ'</b> የሚለውን ቁልፍ ይጫኑ:";
 
             sendMessage($chat_id, $welcome_msg, [
-                "keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ", "request_contact" => true]]],
+                "keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ (Share Contact)", "request_contact" => true]]],
                 "resize_keyboard" => true,
                 "one_time_keyboard" => true
             ]);
@@ -255,9 +279,22 @@ if (isset($update["message"])) {
         exit;
     }
 
+    // Block non-registered users from sending normal text commands
+    $existingUser = findExistingAccount($telegram_id, $username);
+    if (!$existingUser || empty($existingUser['phone'])) {
+        sendMessage($chat_id, "⚠️ <b>ጨዋታውን ለመጠቀም መጀመሪያ ስልክ ቁጥርዎን ማጋራት አለብዎት::</b>", [
+            "keyboard" => [[["text" => "📱 ስልክ ቁጥርዎን ያጋሩ (Share Contact)", "request_contact" => true]]],
+            "resize_keyboard" => true,
+            "one_time_keyboard" => true
+        ]);
+        exit;
+    }
+
     $state_data = firebaseGet(URL_STATES . $telegram_id . ".json");
 
+    // ----------------------------------------------------
     // Deposit SMS Verification
+    // ----------------------------------------------------
     if ($state_data === "waiting_deposit" && !empty($text)) {
         if (preg_match('/\b([A-Z0-9]{10})\b/', strtoupper($text), $matches)) { 
             $tx_id = $matches[1]; 
@@ -333,7 +370,9 @@ if (isset($update["message"])) {
         exit;
     }
 
-    // Withdrawal Amount
+    // ----------------------------------------------------
+    // Withdrawal Amount Processing
+    // ----------------------------------------------------
     if ($state_data === "waiting_wdr_amount" && !empty($text)) {
         $withdraw_amount = floatval($text);
         $user = findExistingAccount($telegram_id, $username);
@@ -366,7 +405,9 @@ if (isset($update["message"])) {
         exit;
     }
 
-    // Withdrawal Confirmation
+    // ----------------------------------------------------
+    // Withdrawal Details Confirmation
+    // ----------------------------------------------------
     if (is_array($state_data) && ($state_data['stage'] ?? '') === 'waiting_wdr_details' && !empty($text)) {
         $withdraw_amount = floatval($state_data['amount']);
         $method = $state_data['method'];
@@ -426,13 +467,13 @@ if (isset($update["message"])) {
 function findExistingAccount($telegram_id, $username = "", $phone = "") {
     // 1. Direct match by users/{telegram_id}
     $user = firebaseGet(URL_USERS . $telegram_id . ".json");
-    if ($user) return $user;
+    if ($user && is_array($user)) return $user;
 
     // 2. Match by userone/{phone}
     if (!empty($phone)) {
         $clean_phone = preg_replace('/[.#$[\]\/]/', '_', (string)$phone);
         $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
-        if ($userone) return $userone;
+        if ($userone && is_array($userone)) return $userone;
     }
 
     // 3. Scan userone for telegram_id or username
@@ -489,7 +530,7 @@ function firebasePut($url, $data) {
 function firebaseGet($url) { 
     $ch = curl_init($url); 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     $res = curl_exec($ch); 
     curl_close($ch); 
     return $res ? json_decode($res, true) : null; 
@@ -499,7 +540,7 @@ function clearState($telegram_id) {
     $ch = curl_init(URL_STATES . $telegram_id . ".json"); 
     curl_setopt($ch, CURLOPT_CUSTOMREQUEST, "DELETE"); 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     curl_exec($ch); 
     curl_close($ch); 
 }
@@ -525,7 +566,7 @@ function curlPost($url, $post) {
     curl_setopt($ch, CURLOPT_POST, true); 
     curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post)); 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     $r = curl_exec($ch); 
     curl_close($ch); 
     return json_decode($r, true); 
