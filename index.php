@@ -34,7 +34,6 @@ if (isset($update["callback_query"])) {
 
     answerCallbackQuery($callback["id"]);
 
-    // Block unverified/unregistered users from interacting with dashboard callbacks
     $user = findExistingAccount($telegram_id, $username);
     if (!$user || empty($user['phone'])) {
         sendMessage($chat_id, "⚠️ <b>መጀመሪያ ስልክ ቁጥርዎን በማጋራት መመዝገብ አለብዎት!</b>", [
@@ -49,42 +48,12 @@ if (isset($update["callback_query"])) {
         clearState($telegram_id);
         editMessageText($chat_id, $message_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
     } elseif ($callback_data === "menu_play") {
-        $balance = floatval($user["balance"] ?? 0);
-        if ($balance <= 0) {
-            $keyboard = ["inline_keyboard" => [[["text" => "💳 ብር አስገባ (Deposit)", "callback_data" => "menu_deposit"]], [["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-            editMessageText($chat_id, $message_id, "⚠️ <b>የሂሳብዎ መጠን ለጨዋታ በቂ አይደለም!</b>\n\nየአሁኑ ቀሪ ሂሳብዎ: <code>ETB " . number_format($balance, 2) . "</code>\nእባክዎ መጀመሪያ ሂሳብዎን ይሙሉ::", $keyboard);
-        } else {
-            $keyboard = ["inline_keyboard" => [[["text" => "🌴 ጀምር (LAUNCH LALA BINGO)", "web_app" => ["url" => GAME_URL]]], [["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-            editMessageText($chat_id, $message_id, "🇯🇲 <b>ወደ LALA ቢንጎ የመጫወቻ ሜዳ እንኳን በደህና መጡ!</b>\n\nእድልዎን ይፈትሹና ትልቅ ያሸንፉ! ጨዋታውን ለመጀመር 'LAUNCH' የሚለውን ቁልፍ ይጫኑ::", $keyboard);
-        }
+        showPlayMenu($chat_id, $message_id, $user);
     } elseif ($callback_data === "menu_deposit") {
-        firebasePut(URL_STATES . $telegram_id . ".json", "waiting_deposit");
-        $keyboard = ["inline_keyboard" => [[["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-        
-        $deposit_text = "━━━━━━━━━━ Telebirr ━━━━━━━━━\n\n"
-                      . "Pay by ቴሌብር 📲 Tele Birr: <b>0979652325</b>\n"
-                      . "Name 👤   <b>YISAK</b>\n\n"
-                      . "Click to Copy 👉:   <code>0979652325</code>\n\n"
-                      . "• ከከፈሉ በኋላ ከቴሌ ብር / 127 የተላከልዎትን የማረጋገጫ ሜሴጅ ላይ የሚገኘውን 10 ዲጂት ትራንዛክሽን ID/ቁጥር ወይንም ሊንክ ለቦቱ ይላኩ፡፡\n\n"
-                      . "ለምሳሌ፡ <code>DLP01WUDO1</code> ወይንም ሊንኩን https://transactioninfo.ethiotelecom.et/receipt/DLP01WUDO1\n\n"
-                      . "አጠቃላይ SMS ማስተላለፍም ይችላሉ::\n\n"
-                      . "-------------------------------------\n"
-                      . "After payment, send either:\n"
-                      . "• Copy paste The SMS text from 127\n"
-                      . "• Telebirr Transaction ID or receipt link";
-                      
-        editMessageText($chat_id, $message_id, $deposit_text, $keyboard);
-    } 
-    
-    // --- STEP 1: INITIALIZE WITHDRAWAL REQUEST ---
-    elseif ($callback_data === "menu_withdraw") {
-        firebasePut(URL_STATES . $telegram_id . ".json", "waiting_wdr_amount");
-        $keyboard = ["inline_keyboard" => [[["text" => "🔙 ሰርዝ", "callback_data" => "menu_dashboard"]]]];
-        editMessageText($chat_id, $message_id, "💰 <b>ብር ማውጫ ገጽ (Withdraw)</b>\n\nማውጣት የሚፈልጉትን የገንዘብ መጠን በቁጥር ብቻ ያስገቡ (ምሳሌ: <code>150</code>):", $keyboard);
-    } 
-    
-    // --- STEP 3: HANDLE GATEWAY PREFERENCE SELECTION ---
-    elseif (str_starts_with($callback_data, "wdr_method_")) {
+        showDepositMenu($chat_id, $telegram_id, $message_id);
+    } elseif ($callback_data === "menu_withdraw") {
+        showWithdrawPrompt($chat_id, $telegram_id, $message_id);
+    } elseif (str_starts_with($callback_data, "wdr_method_")) {
         $method = str_replace("wdr_method_", "", $callback_data);
         
         $currentState = firebaseGet(URL_STATES . $telegram_id . ".json");
@@ -97,62 +66,18 @@ if (isset($update["callback_query"])) {
         $keyboard = ["inline_keyboard" => [[["text" => "🔙 ሰርዝ", "callback_data" => "menu_dashboard"]]]];
         
         if ($method === "telebirr") {
-            $prompt = "📲 <b>የቴሌብር አካውንት መረጃ</b>\n\nእባክዎ ተቀባይ <b>ስም እና የስልክ ቁጥር</b> በዚህ መልክ በ አንድ ላይ አስገብተው ይላኩ:\n\nምሳሌ: <code>ዮሐንስ አበበ - 0912345678</code>";
+            $prompt = "📲 <b>የቴሌብር አካውንት መረጃ</b>\n\nእባክዎ ተቀባይ <b>ስም እና የስልክ ቁጥር</b> በዚህ መልክ በአንድ ላይ አስገብተው ይላኩ:\n\nምሳሌ: <code>ዮሐንስ አበበ - 0912345678</code>";
         } else {
-            $prompt = "🏦 <b>የኢትዮጵያ ንግድ ባንክ (CBE) መረጃ</b>\n\nእባክዎ የባንክ <b>አካውንት ቁጥር እና ሙሉ ስም</b> በዚህ መልክ በ አንድ ላይ አስገብተው ይላኩ:\n\nምሳሌ: <code>1000123456789 - አስቴር ከበደ</code>";
+            $prompt = "🏦 <b>የኢትዮጵያ ንግድ ባንክ (CBE) መረጃ</b>\n\nእባክዎ የባንክ <b>አካውንት ቁጥር እና ሙሉ ስም</b> በዚህ መልክ በአንድ ላይ አስገብተው ይላኩ:\n\nምሳሌ: <code>1000123456789 - አስቴር ከበደ</code>";
         }
         
         editMessageText($chat_id, $message_id, $prompt, $keyboard);
-    }
-    
-    // --- DASHBOARD MENUS ---
-    elseif ($callback_data === "menu_balance") {
-        $balance = floatval($user["balance"] ?? 0.0);
-        
-        $all_deposits = firebaseGet(URL_DEPOSITS . '.json') ?? [];
-        $all_withdrawals = firebaseGet(URL_WITHDRAWALS . '.json') ?? [];
-
-        $dep_log = ""; $dep_count = 0;
-        foreach ($all_deposits as $tx => $meta) {
-            if (($meta['claimed_by'] ?? '') === $username && ($meta['status'] ?? '') === 'processed') {
-                $dep_count++;
-                $tx_time = isset($meta['claimed_at']) ? date("d-m-Y H:i", $meta['claimed_at']) : date("d-m-Y H:i");
-                $dep_log .= "▫️ <code>" . $tx_time . "</code> | <b>+" . number_format($meta['amount'] ?? 0, 2) . " ETB</b>\n";
-                if ($dep_count >= 5) break; 
-            }
-        }
-        if (empty($dep_log)) $dep_log = "<i>የተመዘገበ የገንዘብ ማስገቢያ ታሪክ የለም::</i>\n";
-
-        $wdr_log = ""; $wdr_count = 0;
-        foreach ($all_withdrawals as $wdr_id => $meta) {
-            if (strval($meta['telegram_id'] ?? '') === strval($telegram_id)) {
-                $wdr_count++;
-                $status_raw = $meta['status'] ?? 'pending';
-                $status_text = ($status_raw === 'approved') ? "✅ ተጠናቋል" : (($status_raw === 'rejected') ? "❌ ውድቅ የተደረገ" : "⏳ በሂደት ላይ");
-                $wdr_time = isset($meta['timestamp']) ? date("d-m-Y H:i", intval($meta['timestamp'] / 1000)) : date("d-m-Y H:i");
-                $wdr_log .= "▫️ <code>" . $wdr_time . "</code> | <b>" . number_format($meta['amount'] ?? 0, 2) . " ETB</b> (" . $status_text . ")\n";
-                if ($wdr_count >= 5) break; 
-            }
-        }
-        if (empty($wdr_log)) $wdr_log = "<i>የተመዘገበ የገንዘብ ማውጫ ታሪክ የለም::</i>\n";
-
-        $history_text = "💳 <b>የሂሳብ መግለጫ እና የክፍያ ታሪክ</b>\n\n"
-                      . "💰 ጠቅላላ ቀሪ ሂሳብ: <b>ETB " . number_format($balance, 2) . "</b>\n\n"
-                      . "📥 <b>የገንዘብ ማስገቢያ ታሪክ</b>\n" . $dep_log . "\n"
-                      . "📤 <b>የገንዘብ ማውጫ ታሪክ</b>\n" . $wdr_log;
-
-        $keyboard = ["inline_keyboard" => [[["text" => "📥 ብር አስገባ", "callback_data" => "menu_deposit"], ["text" => "📤 ብር አውጣ", "callback_data" => "menu_withdraw"]], [["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-        editMessageText($chat_id, $message_id, $history_text, $keyboard);
+    } elseif ($callback_data === "menu_balance") {
+        showBalanceMenu($chat_id, $telegram_id, $message_id, $user, $username);
     } elseif ($callback_data === "menu_instructions") {
-        $keyboard = ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-        $info = "ℹ️ <b>የአጠቃቀም መመሪያ እና ደንቦች (LALA BINGO)</b>\n\n1. <b>ገንዘብ ለማስገባት:</b> ቴሌብር ላይ በመክፈል የትራንዛክሽን ኮዱን መላክ::\n2. <b>ገንዘብ ለማውጣት:</b> ማውጫ በመንካት የባንክ ወይም ቴሌብር መረጃ ማቅረብ::\n3. <b>ደንብ:</b> ትክክለኛ መረጃ በማስገባት ፈጣን ክፍያ ያግኙ::";
-        editMessageText($chat_id, $message_id, $info, $keyboard);
+        showInstructionsMenu($chat_id, $message_id);
     } elseif ($callback_data === "menu_referral") {
-        $bot_info = getBotUsername();
-        $ref_link = "https://t.me/" . $bot_info . "?start=" . $telegram_id;
-        $keyboard = ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
-        $ref_text = "🔗 <b>የጓደኛ መጋበዣ ሊንክ (LALA BINGO)</b>\n\nጓደኛዎ ሲመዘገብ የ <b>5.00 ETB</b> ቦነስ ያገኛሉ!\n\n<code>" . $ref_link . "</code>";
-        editMessageText($chat_id, $message_id, $ref_text, $keyboard);
+        showReferralMenu($chat_id, $telegram_id, $message_id);
     }
     exit;
 }
@@ -174,7 +99,6 @@ if (isset($update["message"])) {
     // ----------------------------------------------------
     if (isset($message["contact"])) {
         $phone = (string)$message["contact"]["phone_number"];
-        // Ensure standard phone format
         if (!str_starts_with($phone, "+") && !str_starts_with($phone, "0")) {
             $phone = "+" . $phone;
         }
@@ -197,11 +121,9 @@ if (isset($update["message"])) {
             "username" => ($username === "NoUsername" ? "" : $username)
         ];
         
-        // Save user to users and userone paths
         firebasePut(URL_USERS . $telegram_id . ".json", $user_payload);
         firebasePut(URL_USERONE . $clean_phone . ".json", $user_payload);
 
-        // Process referral bonus if registered via referral state
         $state_data = firebaseGet(URL_STATES . $telegram_id . ".json");
         if (is_array($state_data) && !empty($state_data['referrer_id'])) {
             $ref_id = $state_data['referrer_id'];
@@ -215,6 +137,7 @@ if (isset($update["message"])) {
             }
         }
         clearState($telegram_id);
+        setBotCommands(); // Register slash menu commands
 
         $welcome_success = "✅ <b>ምዝገባዎ በተሳካ ሁኔታ ተጠናቋል!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                          . "👤 ስም: <b>" . htmlspecialchars($first_name . ($last_name ? " " . $last_name : "")) . "</b>\n"
@@ -223,7 +146,7 @@ if (isset($update["message"])) {
                          . "💰 ጠቅላላ ቀሪ ሂሳብ: <b>" . number_format($balance, 2) . " ETB</b>\n"
                          . "━━━━━━━━━━━━━━━━━━━━";
 
-        sendMessage($chat_id, $welcome_success, ["remove_keyboard" => true]);
+        sendMessage($chat_id, $welcome_success, getReplyKeyboard());
         sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         exit;
     }
@@ -240,11 +163,10 @@ if (isset($update["message"])) {
 
         $existingUser = findExistingAccount($telegram_id, $username);
 
-        // User exists AND has already registered a phone number
         if ($existingUser && !empty($existingUser['phone'])) {
             clearState($telegram_id);
+            setBotCommands();
             
-            // Update lastSeen & sync current telegram_id
             $existingUser["lastSeen"] = intval(microtime(true) * 1000);
             $existingUser["telegram_id"] = (int)$telegram_id;
             firebasePut(URL_USERS . $telegram_id . ".json", $existingUser);
@@ -255,10 +177,9 @@ if (isset($update["message"])) {
                            . "💰 ቀሪ ሂሳብ: <b>" . number_format(floatval($existingUser['balance'] ?? 0), 2) . " ETB</b>\n"
                            . "━━━━━━━━━━━━━━━━━━━━";
 
-            sendMessage($chat_id, $status_notify, ["remove_keyboard" => true]);
+            sendMessage($chat_id, $status_notify, getReplyKeyboard());
             sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         } else {
-            // New / Unregistered user: Demand phone sharing
             $state_payload = [
                 "stage" => "waiting_contact",
                 "referrer_id" => $referrer_id
@@ -279,7 +200,7 @@ if (isset($update["message"])) {
         exit;
     }
 
-    // Block non-registered users from sending normal text commands
+    // Require registered phone before parsing commands
     $existingUser = findExistingAccount($telegram_id, $username);
     if (!$existingUser || empty($existingUser['phone'])) {
         sendMessage($chat_id, "⚠️ <b>ጨዋታውን ለመጠቀም መጀመሪያ ስልክ ቁጥርዎን ማጋራት አለብዎት::</b>", [
@@ -287,6 +208,49 @@ if (isset($update["message"])) {
             "resize_keyboard" => true,
             "one_time_keyboard" => true
         ]);
+        exit;
+    }
+
+    // ----------------------------------------------------
+    // CASE 3: Slash Commands & Bottom Keyboard Handling
+    // ----------------------------------------------------
+    if ($text === "🌴 ተጫወት (Play)" || $text === "/play") {
+        clearState($telegram_id);
+        showPlayMenu($chat_id, null, $existingUser);
+        exit;
+    }
+
+    if ($text === "📥 ብር አስገባ (Deposit)" || $text === "/deposit") {
+        showDepositMenu($chat_id, $telegram_id, null);
+        exit;
+    }
+
+    if ($text === "📤 ብር አውጣ (Withdraw)" || $text === "/withdraw") {
+        showWithdrawPrompt($chat_id, $telegram_id, null);
+        exit;
+    }
+
+    if ($text === "💰 ቀሪ ሂሳብ (Balance)" || $text === "/balance") {
+        clearState($telegram_id);
+        showBalanceMenu($chat_id, $telegram_id, null, $existingUser, $username);
+        exit;
+    }
+
+    if ($text === "🔗 ጓደኛ ጋብዝ (Invite)" || $text === "/invite") {
+        clearState($telegram_id);
+        showReferralMenu($chat_id, $telegram_id, null);
+        exit;
+    }
+
+    if ($text === "ℹ️ መመሪያ (Help)" || $text === "/help") {
+        clearState($telegram_id);
+        showInstructionsMenu($chat_id, null);
+        exit;
+    }
+
+    if ($text === "🏠 ዋና ማውጫ (Menu)" || $text === "/menu") {
+        clearState($telegram_id);
+        sendMessage($chat_id, getDashboardText($telegram_id), getDashboardKeyboard($telegram_id));
         exit;
     }
 
@@ -464,19 +428,172 @@ if (isset($update["message"])) {
 // ======================================
 // VIEW & DATABASE HELPERS
 // ======================================
+function getReplyKeyboard() {
+    return [
+        "keyboard" => [
+            [
+                ["text" => "🌴 ተጫወት (Play)", "web_app" => ["url" => GAME_URL]],
+                ["text" => "💰 ቀሪ ሂሳብ (Balance)"]
+            ],
+            [
+                ["text" => "📥 ብር አስገባ (Deposit)"],
+                ["text" => "📤 ብር አውጣ (Withdraw)"]
+            ],
+            [
+                ["text" => "🔗 ጓደኛ ጋብዝ (Invite)"],
+                ["text" => "ℹ️ መመሪያ (Help)"]
+            ],
+            [
+                ["text" => "🏠 ዋና ማውጫ (Menu)"]
+            ]
+        ],
+        "resize_keyboard" => true,
+        "is_persistent" => true
+    ];
+}
+
+function showPlayMenu($chat_id, $message_id, $user) {
+    $balance = floatval($user["balance"] ?? 0);
+    if ($balance <= 0) {
+        $keyboard = ["inline_keyboard" => [[["text" => "💳 ብር አስገባ (Deposit)", "callback_data" => "menu_deposit"]], [["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+        $text = "⚠️ <b>የሂሳብዎ መጠን ለጨዋታ በቂ አይደለም!</b>\n\nየአሁኑ ቀሪ ሂሳብዎ: <code>ETB " . number_format($balance, 2) . "</code>\nእባክዎ መጀመሪያ ሂሳብዎን ይሙሉ::";
+    } else {
+        $keyboard = ["inline_keyboard" => [[["text" => "🌴 ጀምር (LAUNCH LALA BINGO)", "web_app" => ["url" => GAME_URL]]], [["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+        $text = "🇯🇲 <b>ወደ LALA ቢንጎ የመጫወቻ ሜዳ እንኳን በደህና መጡ!</b>\n\nእድልዎን ይፈትሹና ትልቅ ያሸንፉ! ጨዋታውን ለመጀመር 'LAUNCH' የሚለውን ቁልፍ ይጫኑ::";
+    }
+
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $text, $keyboard);
+    } else {
+        sendMessage($chat_id, $text, $keyboard);
+    }
+}
+
+function showDepositMenu($chat_id, $telegram_id, $message_id = null) {
+    firebasePut(URL_STATES . $telegram_id . ".json", "waiting_deposit");
+    $keyboard = ["inline_keyboard" => [[["text" => "🔙 ወደ ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+    
+    $deposit_text = "━━━━━━━━━━ Telebirr ━━━━━━━━━\n\n"
+                  . "Pay by ቴሌብር 📲 Tele Birr: <b>0979652325</b>\n"
+                  . "Name 👤   <b>YISAK</b>\n\n"
+                  . "Click to Copy 👉:   <code>0979652325</code>\n\n"
+                  . "• ከከፈሉ በኋላ ከቴሌ ብር / 127 የተላከልዎትን የማረጋገጫ ሜሴጅ ላይ የሚገኘውን 10 ዲጂት ትራንዛክሽን ID/ቁጥር ወይንም ሊንክ ለቦቱ ይላኩ፡፡\n\n"
+                  . "ለምሳሌ፡ <code>DLP01WUDO1</code> ወይንም ሊንኩን https://transactioninfo.ethiotelecom.et/receipt/DLP01WUDO1\n\n"
+                  . "አጠቃላይ SMS ማስተላለፍም ይችላሉ::\n\n"
+                  . "-------------------------------------\n"
+                  . "After payment, send either:\n"
+                  . "• Copy paste The SMS text from 127\n"
+                  . "• Telebirr Transaction ID or receipt link";
+
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $deposit_text, $keyboard);
+    } else {
+        sendMessage($chat_id, $deposit_text, $keyboard);
+    }
+}
+
+function showWithdrawPrompt($chat_id, $telegram_id, $message_id = null) {
+    firebasePut(URL_STATES . $telegram_id . ".json", "waiting_wdr_amount");
+    $keyboard = ["inline_keyboard" => [[["text" => "🔙 ሰርዝ", "callback_data" => "menu_dashboard"]]]];
+    $text = "💰 <b>ብር ማውጫ ገጽ (Withdraw)</b>\n\nማውጣት የሚፈልጉትን የገንዘብ መጠን በቁጥር ብቻ ያስገቡ (ምሳሌ: <code>150</code>):";
+
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $text, $keyboard);
+    } else {
+        sendMessage($chat_id, $text, $keyboard);
+    }
+}
+
+function showBalanceMenu($chat_id, $telegram_id, $message_id, $user, $username) {
+    $balance = floatval($user["balance"] ?? 0.0);
+    $all_deposits = firebaseGet(URL_DEPOSITS . '.json') ?? [];
+    $all_withdrawals = firebaseGet(URL_WITHDRAWALS . '.json') ?? [];
+
+    $dep_log = ""; $dep_count = 0;
+    foreach ($all_deposits as $tx => $meta) {
+        if (($meta['claimed_by'] ?? '') === $username && ($meta['status'] ?? '') === 'processed') {
+            $dep_count++;
+            $tx_time = isset($meta['claimed_at']) ? date("d-m-Y H:i", $meta['claimed_at']) : date("d-m-Y H:i");
+            $dep_log .= "▫️ <code>" . $tx_time . "</code> | <b>+" . number_format($meta['amount'] ?? 0, 2) . " ETB</b>\n";
+            if ($dep_count >= 5) break; 
+        }
+    }
+    if (empty($dep_log)) $dep_log = "<i>የተመዘገበ የገንዘብ ማስገቢያ ታሪክ የለም::</i>\n";
+
+    $wdr_log = ""; $wdr_count = 0;
+    foreach ($all_withdrawals as $wdr_id => $meta) {
+        if (strval($meta['telegram_id'] ?? '') === strval($telegram_id)) {
+            $wdr_count++;
+            $status_raw = $meta['status'] ?? 'pending';
+            $status_text = ($status_raw === 'approved') ? "✅ ተጠናቋል" : (($status_raw === 'rejected') ? "❌ ውድቅ የተደረገ" : "⏳ በሂደት ላይ");
+            $wdr_time = isset($meta['timestamp']) ? date("d-m-Y H:i", intval($meta['timestamp'] / 1000)) : date("d-m-Y H:i");
+            $wdr_log .= "▫️ <code>" . $wdr_time . "</code> | <b>" . number_format($meta['amount'] ?? 0, 2) . " ETB</b> (" . $status_text . ")\n";
+            if ($wdr_count >= 5) break; 
+        }
+    }
+    if (empty($wdr_log)) $wdr_log = "<i>የተመዘገበ የገንዘብ ማውጫ ታሪክ የለም::</i>\n";
+
+    $history_text = "💳 <b>የሂሳብ መግለጫ እና የክፍያ ታሪክ</b>\n\n"
+                  . "💰 ጠቅላላ ቀሪ ሂሳብ: <b>ETB " . number_format($balance, 2) . "</b>\n\n"
+                  . "📥 <b>የገንዘብ ማስገቢያ ታሪክ</b>\n" . $dep_log . "\n"
+                  . "📤 <b>የገንዘብ ማውጫ ታሪክ</b>\n" . $wdr_log;
+
+    $keyboard = ["inline_keyboard" => [[["text" => "📥 ብር አስገባ", "callback_data" => "menu_deposit"], ["text" => "📤 ብር አውጣ", "callback_data" => "menu_withdraw"]], [["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+    
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $history_text, $keyboard);
+    } else {
+        sendMessage($chat_id, $history_text, $keyboard);
+    }
+}
+
+function showInstructionsMenu($chat_id, $message_id = null) {
+    $keyboard = ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+    $info = "ℹ️ <b>የአጠቃቀም መመሪያ እና ደንቦች (LALA BINGO)</b>\n\n1. <b>ገንዘብ ለማስገባት:</b> ቴሌብር ላይ በመክፈል የትራንዛክሽን ኮዱን መላክ::\n2. <b>ገንዘብ ለማውጣት:</b> ማውጫ በመንካት የባንክ ወይም ቴሌብር መረጃ ማቅረብ::\n3. <b>ደንብ:</b> ትክክለኛ መረጃ በማስገባት ፈጣን ክፍያ ያግኙ::";
+
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $info, $keyboard);
+    } else {
+        sendMessage($chat_id, $info, $keyboard);
+    }
+}
+
+function showReferralMenu($chat_id, $telegram_id, $message_id = null) {
+    $bot_info = getBotUsername();
+    $ref_link = "https://t.me/" . $bot_info . "?start=" . $telegram_id;
+    $keyboard = ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]];
+    $ref_text = "🔗 <b>የጓደኛ መጋበዣ ሊንክ (LALA BINGO)</b>\n\nጓደኛዎ ሲመዘገብ የ <b>5.00 ETB</b> ቦነስ ያገኛሉ!\n\n<code>" . $ref_link . "</code>";
+
+    if ($message_id) {
+        editMessageText($chat_id, $message_id, $ref_text, $keyboard);
+    } else {
+        sendMessage($chat_id, $ref_text, $keyboard);
+    }
+}
+
+function setBotCommands() {
+    $commands = [
+        ["command" => "menu", "description" => "ዋና ማውጫ (Main Dashboard)"],
+        ["command" => "play", "description" => "LALA BINGO ጀምር (Play Game)"],
+        ["command" => "deposit", "description" => "ብር አስገባ (Deposit Money)"],
+        ["command" => "withdraw", "description" => "ብር አውጣ (Withdraw Money)"],
+        ["command" => "balance", "description" => "ቀሪ ሂሳብ እና ታሪክ (Account Balance)"],
+        ["command" => "invite", "description" => "ጓደኛ ጋብዝ (Invite Friends)"],
+        ["command" => "help", "description" => "የአጠቃቀም መመሪያ (Rules & Guide)"]
+    ];
+    curlPost("https://api.telegram.org/bot" . BOT_TOKEN . "/setMyCommands", ["commands" => json_encode($commands)]);
+}
+
 function findExistingAccount($telegram_id, $username = "", $phone = "") {
-    // 1. Direct match by users/{telegram_id}
     $user = firebaseGet(URL_USERS . $telegram_id . ".json");
     if ($user && is_array($user)) return $user;
 
-    // 2. Match by userone/{phone}
     if (!empty($phone)) {
         $clean_phone = preg_replace('/[.#$[\]\/]/', '_', (string)$phone);
         $userone = firebaseGet(URL_USERONE . $clean_phone . ".json");
         if ($userone && is_array($userone)) return $userone;
     }
 
-    // 3. Scan userone for telegram_id or username
     $allUserone = firebaseGet(URL_USERONE . ".json");
     if (is_array($allUserone)) {
         foreach ($allUserone as $record) {
@@ -564,7 +681,7 @@ function answerCallbackQuery($id) {
 function curlPost($url, $post) { 
     $ch = curl_init($url); 
     curl_setopt($ch, CURLOPT_POST, true); 
-    curl_setopt($ch, CURLOPT_POSTFIELDS, http_build_query($post)); 
+    curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($post) ? http_build_query($post) : $post); 
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true); 
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); 
     $r = curl_exec($ch); 
