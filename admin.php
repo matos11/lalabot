@@ -1,11 +1,7 @@
 <?php
 /**
- * LALA BINGO — Admin Console (roles & privileges)
+ * LALA BINGO — Admin Console (roles & privileges + Firebase Deposits, Withdrawals & Admins)
  * Requires PHP 7.4+ with cURL. Single file, Firebase Realtime Database (REST) + Telegram Bot API.
- *
- * Set these as environment variables on your host (do NOT hard-code secrets):
- *   BOT_TOKEN, GAME_URL, BASE_FIREBASE, FIREBASE_AUTH (optional DB secret/token),
- *   ADMIN_USER, ADMIN_PASS   <- the "root" super admin
  */
 session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, 'samesite' => 'Lax', 'secure' => !empty($_SERVER['HTTPS'])]);
 session_start();
@@ -75,7 +71,7 @@ function fbPatch(string $p, array $d) { return fb('PATCH', $p, $d); }
 function fbDel(string $p) { return fb('DELETE', $p); }
 function k($s): string { return rawurlencode((string)$s); }
 
-/** Concurrency-safe balance change (ETag compare-and-set) — the game server may write the same balance. */
+/** Concurrency-safe balance change (ETag compare-and-set) */
 function adjustBalance(string $uid, float $delta, &$after = null): bool {
     for ($i = 0; $i < 6; $i++) {
         $h = []; $c = 0;
@@ -200,7 +196,7 @@ if ($POST && isset($_POST['login'])) {
         foreach (fbGet('admins') ?: [] as $id => $a) {
             if (!is_array($a) || ($a['username'] ?? '') !== $u || !($a['active'] ?? true)) continue;
             if (isset($a['pass_hash']) && password_verify($p, $a['pass_hash'])) $ok = $id;
-            elseif (isset($a['password']) && hash_equals((string)$a['password'], $p)) { // legacy plaintext → upgrade to hash
+            elseif (isset($a['password']) && hash_equals((string)$a['password'], $p)) { 
                 $ok = $id;
                 fbPatch("admins/" . k($id), ['pass_hash' => password_hash($p, PASSWORD_DEFAULT), 'password' => null, 'role' => $a['role'] ?? 'manager']);
             }
@@ -566,7 +562,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
   </div>
 
   <?php if (DEFAULT_CREDS && $ME['id'] === 'root'): ?>
-    <div class="banner">⚠️ You are using the default <b>admin / admin123</b> login. Set the <code>ADMIN_USER</code> and <code>ADMIN_PASS</code> environment variables on your server, then create named admins under <a href="admin.php?tab=admins">Admins &amp; roles</a>.</div>
+    <div class="banner">⚠️ You are using the default <b>admin / admin123</b> login. Set the <code>ADMIN_USER</code> and <code>ADMIN_PASS</code> environment variables on your server, or create database-backed admins under <a href="admin.php?tab=admins">Admins &amp; roles</a>.</div>
   <?php endif; ?>
   <?php if (BOT_TOKEN === ''): ?><div class="banner">The <code>BOT_TOKEN</code> environment variable is not set — broadcasts and player notifications are disabled.</div><?php endif; ?>
 
@@ -594,7 +590,6 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
     <div class="card"><h3>Money flow, last 7 days <small>ETB</small></h3>
       <div class="bars"><?php foreach ($days as $dk => $v): ?><div class="d"><div class="pair"><i class="i-in" style="height:<?= round($v['in'] / $max * 100) ?>%" title="In <?= money($v['in']) ?>"></i><i class="i-out" style="height:<?= round($v['out'] / $max * 100) ?>%" title="Out <?= money($v['out']) ?>"></i></div><small><?= date('D', strtotime($dk)) ?></small></div><?php endforeach; ?></div>
       <div class="legend"><span><b class="i-in"></b>Deposits approved</span><span><b class="i-out"></b>Withdrawals sent</span></div>
-      <?php if (!array_sum(array_column($days, 'in')) && !array_sum(array_column($days, 'out'))): ?><p class="muted" style="margin-top:10px;font-size:13px">Bars fill in as you approve payments here — older records have no timestamp.</p><?php endif; ?>
     </div>
     <div class="card"><h3>Top balances</h3>
       <div class="tbl"><table><?php foreach ($top as $key => $u): ?><tr><td><a href="admin.php?tab=user&id=<?= e(uidOf($key, $u)) ?>"><b><?= e($u['first_name'] ?? 'Player') ?></b></a> <small>@<?= e($u['username'] ?? '—') ?></small></td><td class="num" style="text-align:right"><?= money($u['balance'] ?? 0) ?> ETB</td></tr><?php endforeach; ?>
@@ -684,7 +679,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
   <?php if (can('users.delete')): ?><div class="card"><h3>Danger zone</h3><form method="POST" data-confirm="Delete this player permanently? This cannot be undone."><?= csrf() ?><input type="hidden" name="action" value="delete_user"><input type="hidden" name="uid" value="<?= e($uid) ?>"><button class="bad sm" type="submit">Delete player</button></form></div><?php endif; ?>
 <?php endif; ?>
 
-<?php /* ═════════ DEPOSITS ═════════ */ elseif ($tab === 'deposits'):
+<?php /* ═════════ DEPOSITS (Direct from Firebase DB) ═════════ */ elseif ($tab === 'deposits'):
     $s = $_GET['s'] ?? 'all';
     $list = array_filter($deposits, function ($d) use ($s) { $st = $d['status'] ?? 'pending'; return $s === 'all' || ($s === 'pending' ? !in_array($st, ['processed', 'rejected'], true) : $st === $s); });
 ?>
@@ -700,10 +695,10 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
           <td><?php if (can('deposits.process') && $st !== 'processed'): ?><div class="row">
             <form method="POST" data-confirm="Approve and credit <?= money($d['amount'] ?? 0) ?> ETB?"><?= csrf() ?><input type="hidden" name="action" value="process_deposit"><input type="hidden" name="tx_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="processed"><button class="sm ok">Approve</button></form>
             <?php if ($st !== 'rejected'): ?><form method="POST" data-confirm="Reject this deposit?"><?= csrf() ?><input type="hidden" name="action" value="process_deposit"><input type="hidden" name="tx_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="rejected"><button class="sm bad">Reject</button></form><?php endif; ?></div><?php endif; ?></td></tr>
-      <?php endforeach; if (!$list): ?><tr><td colspan="5" class="muted">Nothing here.</td></tr><?php endif; ?></table></div>
+      <?php endforeach; if (!$list): ?><tr><td colspan="5" class="muted">Nothing here in Firebase database.</td></tr><?php endif; ?></table></div>
   </div>
 
-<?php /* ═════════ WITHDRAWALS ═════════ */ elseif ($tab === 'withdrawals'):
+<?php /* ═════════ WITHDRAWALS (Direct from Firebase DB) ═════════ */ elseif ($tab === 'withdrawals'):
     $s = $_GET['s'] ?? 'all';
     $list = array_filter($withdrawals, function ($w) use ($s) { return $s === 'all' || ($w['status'] ?? 'pending') === $s; });
 ?>
@@ -719,7 +714,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
           <td><?php if (can('withdrawals.process') && $st === 'pending'): ?><div class="row">
             <form method="POST" data-confirm="Mark <?= money($w['amount'] ?? 0) ?> ETB as sent?"><?= csrf() ?><input type="hidden" name="action" value="process_withdrawal"><input type="hidden" name="wdr_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="approved"><button class="sm ok">Sent</button></form>
             <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="process_withdrawal"><input type="hidden" name="wdr_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="rejected"><input type="hidden" name="reason" value=""><button type="button" class="sm bad js-reject">Reject &amp; refund</button></form></div><?php endif; ?></td></tr>
-      <?php endforeach; if (!$list): ?><tr><td colspan="5" class="muted">Nothing here.</td></tr><?php endif; ?></table></div>
+      <?php endforeach; if (!$list): ?><tr><td colspan="5" class="muted">Nothing here in Firebase database.</td></tr><?php endif; ?></table></div>
   </div>
 
 <?php /* ═════════ BROADCAST ═════════ */ elseif ($tab === 'broadcast'):
@@ -776,12 +771,13 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
       <?php foreach ($rows as $l): ?><tr><td><?= fdate((int)($l['at'] ?? 0)) ?></td><td><b><?= e($l['by'] ?? '') ?></b><br><small><?= e($l['role'] ?? '') ?></small></td><td><code><?= e($l['action'] ?? '') ?></code></td><td><?= e($l['detail'] ?? '') ?></td><td><small><?= e($l['ip'] ?? '') ?></small></td></tr><?php endforeach; ?>
     <?php endif; if (!$rows): ?><tr><td class="muted">Nothing recorded yet.</td></tr><?php endif; ?></table></div></div>
 
-<?php /* ═════════ ADMINS ═════════ */ elseif ($tab === 'admins'):
+<?php /* ═════════ ADMINS (Saved to Firebase DB) ═════════ */ elseif ($tab === 'admins'):
     $admins = array_filter(fbGet('admins') ?: [], 'is_array');
     $permForm = function (array $have) use ($perms) { foreach ($perms as $pk => $pl) echo '<label><input type="checkbox" name="perms[]" value="' . e($pk) . '" ' . (in_array($pk, $have, true) ? 'checked' : '') . '> ' . e($pl) . '</label>'; };
     $roleOpts = function (string $sel) use ($roles) { foreach ($roles as $rk => $r) echo '<option value="' . e($rk) . '" ' . ($sel === $rk ? 'selected' : '') . '>' . e($r['label']) . ' — ' . e($r['desc']) . '</option>'; };
 ?>
   <div class="card"><h3>Team <small><?= count($admins) + 1 ?> accounts</small></h3>
+    <p class="muted" style="margin-bottom:14px; font-size:13px;">New admin logins created here are saved securely inside your Firebase database under the <code>admins/</code> node.</p>
     <div class="tbl"><table><tr><th>Admin</th><th>Role</th><th>Limit / action</th><th>Last sign-in</th><th></th></tr>
       <tr><td><b><?= e(ROOT_USER) ?></b> <small>root</small></td><td>Super admin</td><td>No limit</td><td>—</td><td class="muted">Set by server environment</td></tr>
       <?php foreach ($admins as $id => $a): $r = $a['role'] ?? 'manager'; ?>
@@ -797,12 +793,12 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
             <form method="POST" data-confirm="Delete this admin?" style="margin-top:8px"><?= csrf() ?><input type="hidden" name="action" value="delete_admin"><input type="hidden" name="id" value="<?= e($id) ?>"><button class="sm bad" type="submit">Delete admin</button></form></details></td></tr>
       <?php endforeach; ?></table></div></div>
 
-  <div class="card"><h3>Add admin</h3>
+  <div class="card"><h3>Add admin (Saved to Firebase)</h3>
     <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="add_admin">
       <div class="split"><div><label>Username</label><input name="username" required pattern="[A-Za-z0-9_.\-]{3,32}"></div><div><label>Password (8+ characters)</label><input type="password" name="password" required minlength="8" autocomplete="new-password"></div></div>
       <div class="split"><div><label>Role</label><select name="role" data-role-preset><?php $roleOpts('support'); ?></select></div><div><label>Max amount per approval / adjustment (0 = no limit)</label><input type="number" name="limit" min="0" step="0.01" value="0"></div></div>
       <label>Privileges <span class="muted">— picking a role fills these in; tick or untick to customise</span></label><div class="permgrid"><?php $permForm($roles['support']['perms']); ?></div>
-      <button type="submit">Create admin</button></form></div>
+      <button type="submit">Save admin to Firebase</button></form></div>
 
   <div class="card"><h3>What each role can do</h3><div class="tbl"><table>
     <tr><th>Privilege</th><?php foreach ($roles as $r): ?><th><?= e($r['label']) ?></th><?php endforeach; ?></tr>
