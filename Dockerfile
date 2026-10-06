@@ -5,7 +5,7 @@ RUN apt-get update && apt-get install -y \
     libcurl4-openssl-dev \
     pkg-config \
     libssl-dev \
-    && docker-php-ext-install curl json
+    && docker-php-ext-install curl 
 
 # Enable Apache rewrite module
 RUN a2enmod rewrite
