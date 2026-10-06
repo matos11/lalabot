@@ -1,9 +1,12 @@
 <?php
 // admin.php - LALA BINGO Broadcast Admin Panel
-require_once 'bot.php'; // Reuse your token, base firebase URL, and curl helpers
 
-// Simple password protection (Change 'admin123' to a secure password!)
-define('ADMIN_PASSWORD', 'admin123');
+// Configuration Constants
+define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAHDAoOxTRw-0xBLXJGY8rIaRtVBG3LnKxM');
+define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
+define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com/');
+
+define('ADMIN_PASSWORD', 'admin123'); // Change this to your secure password!
 
 $status_message = "";
 
@@ -19,7 +22,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if (empty($text)) {
             $status_message = "❌ እባክዎ የመልእክት ጽሁፍ ያስገቡ!";
         } else {
-            $all_users = firebaseGet("users.json");
+            $all_users = firebaseGet(BASE_FIREBASE . "users.json");
             $success_count = 0;
             $fail_count = 0;
 
@@ -58,7 +61,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     } else {
                         $fail_count++;
                     }
-                    usleep(35000); // Prevent hitting Telegram rate limits (approx 30 msgs/sec)
+                    usleep(35000); // Prevent hitting Telegram rate limits (~30 msgs/sec)
                 }
                 $status_message = "✅ ብሮድካስት ተጠናቋል! የተሳካ: <b>{$success_count}</b>, ያልተሳካ: <b>{$fail_count}</b>";
             } else {
@@ -66,6 +69,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
     }
+}
+
+// Helper Functions
+function firebaseGet($url) {  
+    $ch = curl_init($url);  
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);  
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);  
+    $res = curl_exec($ch);  
+    curl_close($ch);  
+    return $res ? json_decode($res, true) : null;  
+}
+
+function curlPost($url, $post) {  
+    $ch = curl_init($url);  
+    curl_setopt($ch, CURLOPT_POST, true);  
+    curl_setopt($ch, CURLOPT_POSTFIELDS, is_array($post) ? http_build_query($post) : $post);  
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);  
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);  
+    $r = curl_exec($ch);  
+    curl_close($ch);  
+    return json_decode($r, true);  
 }
 ?>
 <!DOCTYPE html>
