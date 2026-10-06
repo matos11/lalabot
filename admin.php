@@ -1,21 +1,21 @@
 <?php
-// admin.php - LALA BINGO Broadcast Admin Panel
+// admin.php - LALA BINGO Admin Broadcast Panel (with Local Image Upload)
 
 // Configuration Constants
 define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAHDAoOxTRw-0xBLXJGY8rIaRtVBG3LnKxM');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
 define('BASE_FIREBASE', getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com/');
 
-define('ADMIN_PASSWORD', 'admin123'); // Change this to your secure password!
+define('ADMIN_PASSWORD', 'admin123'); // የይለፍ ቃልዎን እዚህ ማስተካከል ይችላሉ
 
 $status_message = "";
+$debug_errors = [];
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if (($_POST['password'] ?? '') !== ADMIN_PASSWORD) {
         $status_message = "❌ የተሳሳተ የይለፍ ቃል! (Incorrect Password)";
     } else {
         $text = trim($_POST['message'] ?? '');
-        $image_url = trim($_POST['image_url'] ?? '');
         $btn_text = trim($_POST['btn_text'] ?? '🌴 Play now');
         $btn_url = trim($_POST['btn_url'] ?? GAME_URL);
 
@@ -33,19 +33,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]
                 ];
 
-                foreach ($all_users as $telegram_id => $userData) {
-                    if (!isset($userData['telegram_id'])) continue;
-                    $chat_id = $userData['telegram_id'];
+                // Handle Local Image Upload
+                $local_image_path = null;
+                if (isset($_FILES['image_file']) && $_FILES['image_file']['error'] === UPLOAD_ERR_OK) {
+                    $file_tmp = $_FILES['image_file']['tmp_name'];
+                    // Ensure it's an image
+                    $check = getimagesize($file_tmp);
+                    if ($check !== false) {
+                        // Use CurlFile for sending local file via POST
+                        $local_image_path = new CURLFile($file_tmp, mime_content_type($file_tmp), $_FILES['image_file']['name']);
+                    }
+                }
 
-                    if (!empty($image_url)) {
+                foreach ($all_users as $key => $userData) {
+                    $chat_id = $userData['telegram_id'] ?? (is_numeric($key) ? $key : null);
+                    
+                    if (!$chat_id) {
+                        $fail_count++;
+                        continue;
+                    }
+
+                    if ($local_image_path) {
                         $payload = [
                             "chat_id" => $chat_id,
-                            "photo" => $image_url,
+                            "photo" => $local_image_path,
                             "caption" => $text,
                             "parse_mode" => "HTML",
                             "reply_markup" => json_encode($keyboard)
                         ];
-                        $res = curlPost("https://api.telegram.org/bot" . BOT_TOKEN . "/sendPhoto", $payload);
+                        $res = curlPostMultipart("https://api.telegram.org/bot" . BOT_TOKEN . "/sendPhoto", $payload);
                     } else {
                         $payload = [
                             "chat_id" => $chat_id,
@@ -60,9 +76,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $success_count++;
                     } else {
                         $fail_count++;
+                        $error_desc = $res['description'] ?? 'Unknown error';
+                        $debug_errors[] = "ID: {$chat_id} -> {$error_desc}";
                     }
-                    usleep(35000); // Prevent hitting Telegram rate limits (~30 msgs/sec)
+                    usleep(35000); // Prevent hitting rate limits (~30 msgs/sec)
                 }
+                
                 $status_message = "✅ ብሮድካስት ተጠናቋል! የተሳካ: <b>{$success_count}</b>, ያልተሳካ: <b>{$fail_count}</b>";
             } else {
                 $status_message = "❌ በዳታቤዝ ውስጥ ምንም ተጠቃሚ አልተገኘም::";
@@ -91,6 +110,17 @@ function curlPost($url, $post) {
     curl_close($ch);  
     return json_decode($r, true);  
 }
+
+function curlPostMultipart($url, $post) {
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, $post);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    $r = curl_exec($ch);
+    curl_close($ch);
+    return json_decode($r, true);
+}
 ?>
 <!DOCTYPE html>
 <html lang="am">
@@ -107,6 +137,7 @@ function curlPost($url, $post) {
         button { width: 100%; margin-top: 25px; background: #0284c7; color: white; border: none; padding: 14px; font-size: 16px; font-weight: bold; border-radius: 6px; cursor: pointer; transition: background 0.2s; }
         button:hover { background: #0369a1; }
         .alert { padding: 15px; background: #334155; border-left: 4px solid #38bdf8; margin-bottom: 20px; border-radius: 4px; }
+        .error-logs { background: #0f172a; padding: 10px; border-radius: 6px; margin-top: 15px; font-size: 13px; max-height: 150px; overflow-y: auto; color: #fca5a5; }
     </style>
 </head>
 <body>
@@ -115,12 +146,20 @@ function curlPost($url, $post) {
         <?php if (!empty($status_message)): ?>
             <div class="alert"><?php echo $status_message; ?></div>
         <?php endif; ?>
-        <form method="POST">
+
+        <?php if (!empty($debug_errors)): ?>
+            <div class="error-logs">
+                <strong>የስህተት ዝርዝር (Debug Errors):</strong><br>
+                <?php foreach($debug_errors as $err) { echo htmlspecialchars($err) . "<br>"; } ?>
+            </div>
+        <?php endif; ?>
+
+        <form method="POST" enctype="multipart/form-data">
             <label>የአስተዳዳሪ የይለፍ ቃል (Password):</label>
             <input type="password" name="password" required placeholder="admin123">
 
-            <label>የምስል ሊንክ (Image URL - አማራጭ):</label>
-            <input type="text" name="image_url" placeholder="https://example.com/banner.jpg">
+            <label>ከኮምፒዩተርዎ ምስል ይምረጡ (Local Image File):</label>
+            <input type="file" name="image_file" accept="image/*">
 
             <label>የመልእክት ጽሁፍ (Message HTML supported):</label>
             <textarea name="message" required placeholder="💎 <b>የላቀ አሸናፊ ነፍ ዛሬ በ LALA BINGO!</b>&#10;&#10;እድልዎን አሁኑኑ ይሞክሩ..."></textarea>
