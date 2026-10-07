@@ -2,7 +2,7 @@
 // bot.php - LALA BINGO Webhook Engine
 
 // Environment Configuration
-define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAHDAoOxTRw-0xBLXJGY8rIaRtVBG3LnKxM');
+define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAEghPf8D6fmTNHIJsRFktyIWd52B0ekSPE');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
 define('BASE_FIREBASE', rtrim(getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com/', '/') . '/');
 
