@@ -257,7 +257,7 @@ if (isset($update["message"])) {
     $state_data = firebaseGet(URL_STATES . $telegram_id . ".json");
 
     // ----------------------------------------------------
-    // Deposit SMS / Manual Text Parser & One-Time Guard
+    // Deposit SMS / Manual Text Parser & Automatic Top-Up
     // ----------------------------------------------------
     if ($state_data === "waiting_deposit" && !empty($text)) {
         $tx_id = '';
@@ -276,7 +276,7 @@ if (isset($update["message"])) {
             exit;
         }
 
-        // Extract Amount
+        // Extract Amount from SMS text
         if (preg_match('/(?:ETB|ብር)\s*([0-9,]+(?:\.\d{1,2})?)/ui', $text, $amt_matches) || 
             preg_match('/([0-9,]+(?:\.\d{1,2})?)\s*(?:ETB|ብር)/ui', $text, $amt_matches)) {
             $parsed_amount = floatval(str_replace(',', '', $amt_matches[1]));
@@ -289,7 +289,7 @@ if (isset($update["message"])) {
             $sender_name = $first_name . ($last_name ? " " . $last_name : "");
         }
 
-        // One-Time Usage Guard Check
+        // 1. Check if transaction already used in deposits/transactions table
         $existing_tx = firebaseGet(URL_TRANSACTIONS . $tx_id . ".json") ?: firebaseGet(URL_DEPOSITS . $tx_id . ".json");
         if ($existing_tx && in_array($existing_tx["status"] ?? "", ["processed", "approved"], true)) {
             sendMessage($chat_id, "❌ ይህ የትራንዛክሽን ቁጥር (<code>" . $tx_id . "</code>) ቀድሞውኑ ጥቅም ላይ ውሏል! አንድ ኮድ ለአንድ ጊዜ ብቻ ነው የሚያገለግለው::", ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]]);
@@ -297,8 +297,30 @@ if (isset($update["message"])) {
             exit;
         }
 
-        $system_amount = $parsed_amount > 0 ? $parsed_amount : 0.0;
+        $system_amount = $parsed_amount;
+        if ($system_amount <= 0 && $existing_tx && isset($existing_tx['amount'])) {
+            $system_amount = floatval($existing_tx['amount']);
+        }
+
+        if ($system_amount <= 0) {
+            sendMessage($chat_id, "❌ <b>የገንዘብ መጠን ማግኘት አልተቻለም!</b>\n\nእባክዎ ትክክለኛውን የቴሌብር SMS ሙሉውን ኮፒ አድርገው ይላኩ።", ["inline_keyboard" => [[["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]]);
+            exit;
+        }
+
+        // 2. Automatically Credit User Balance
+        $user = findExistingAccount($telegram_id, $username);
+        $current_balance = floatval($user["balance"] ?? 0);
+        $new_balance = $current_balance + $system_amount;
+
+        $user["balance"] = $new_balance;
+        $user["lastSeen"] = intval(microtime(true) * 1000);
         
+        firebasePut(URL_USERS . $telegram_id . ".json", $user);
+        if (!empty($user['phone'])) {
+            firebasePut(URL_USERONE . preg_replace('/[.#$[\]\/]/', '_', (string)$user['phone']) . ".json", $user);
+        }
+
+        // 3. Mark transaction as approved
         $tx_payload = [
             "id" => $tx_id,
             "telegram_id" => (int)$telegram_id,
@@ -307,7 +329,7 @@ if (isset($update["message"])) {
             "sender_name" => $sender_name,
             "amount" => $system_amount,
             "raw_sms" => $text,
-            "status" => "pending",
+            "status" => "approved",
             "timestamp" => time() * 1000
         ];
         
@@ -315,13 +337,18 @@ if (isset($update["message"])) {
         firebasePut(URL_DEPOSITS . $tx_id . ".json", $tx_payload);
         clearState($telegram_id);
         
-        $success_msg = "📥 <b>የክፍያ ማረጋገጫዎ ተቀባይነት አግኝቷል!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
+        $success_msg = "✅ <b>ክፍያዎ በትክክል ተረጋግጦ ቀሪ ሂሳብዎ ገብቷል!</b>\n━━━━━━━━━━━━━━━━━━━━\n"
                      . "🆔 የትራንዛክሽን ID: <code>" . $tx_id . "</code>\n"
-                     . "👤 ስም: <b>" . htmlspecialchars($sender_name) . "</b>\n"
-                     . "💵 መጠን: <b>" . ($system_amount > 0 ? number_format($system_amount, 2) . " ETB" : "በማጣራት ላይ...") . "</b>\n"
-                     . "⏳ ሁኔታ: <b>በአስተዳዳሪዎች ማረጋገጫ ላይ ይገኛል (Pending Admin Review)</b>\n━━━━━━━━━━━━━━━━━━━━";
+                     . "💵 የገባው መጠን: <b>" . number_format($system_amount, 2) . " ETB</b>\n"
+                     . "💰 አዲስ ቀሪ ሂሳብ: <b>" . number_format($new_balance, 2) . " ETB</b>\n"
+                     . "━━━━━━━━━━━━━━━━━━━━";
                      
-        sendMessage($chat_id, $success_msg, ["inline_keyboard" => [[["text" => "🌴 አሁኑኑ ተጫወት", "callback_data" => "menu_play"]], [["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]]]);
+        sendMessage($chat_id, $success_msg, [
+            "inline_keyboard" => [
+                [["text" => "🌴 አሁኑኑ ተጫወት", "callback_data" => "menu_play"]], 
+                [["text" => "🔙 ዋና ማውጫ", "callback_data" => "menu_dashboard"]]
+            ]
+        ]);
         exit;
     }
 
