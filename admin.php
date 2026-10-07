@@ -11,7 +11,7 @@ session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, '
 session_start();
 date_default_timezone_set('Africa/Addis_Ababa');
 
-define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAEghPf8D6fmTNHIJsRFktyIWd52B0ekSPE');
+define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
 define('BASE_FIREBASE', rtrim(getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com', '/') . '/');
 define('FIREBASE_AUTH', getenv('FIREBASE_AUTH') ?: '');
@@ -24,7 +24,7 @@ function permList(): array {
     return [
         'users.view' => 'View players', 'users.balance' => 'Adjust balances & bonuses', 'users.ban' => 'Ban, VIP & notes',
         'users.message' => 'Message players', 'users.delete' => 'Delete players',
-        'deposits.view' => 'View deposits', 'deposits.process' => 'Approve / reject deposits',
+        'deposits.view' => 'View deposits', 'deposits.process' => 'Link deposits to players (credit is automatic)',
         'transactions.view' => 'View incoming payments', 'transactions.import' => 'Extract & save payments to deposits',
         'withdrawals.view' => 'View withdrawals', 'withdrawals.process' => 'Approve / reject withdrawals',
         'broadcast.send' => 'Send broadcasts', 'settings.manage' => 'Game & bot settings',
@@ -138,7 +138,7 @@ function normTxId(string $s): string {
 }
 /** Pull amount, sender name, transaction number and date out of a Telebirr / CBE / bank SMS or receipt text. */
 function parseTxn(string $text): array {
-    $out = ['amount' => 0.0, 'name' => '', 'tx_id' => '', 'ts' => 0];
+    $out = ['amount' => 0.0, 'name' => '', 'tx_id' => '', 'ts' => 0, 'phone' => ''];
     $t = trim(preg_replace('/\s+/', ' ', strip_tags($text)));
     if ($t === '') return $out;
     $num = '(\d{1,3}(?:,\d{3})+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?)';
@@ -156,6 +156,7 @@ function parseTxn(string $text): array {
         || preg_match('/\b(?:sender|payer|name)\s*[:\-]\s*([^,;(]+)/i', $t, $m)) {
         $out['name'] = mb_substr(trim(preg_replace('/[\d\*]{6,}/', '', $m[1]), " \t-."), 0, 60);
     }
+    if (preg_match('/\bfrom\b(.{0,70})/i', $t, $m2) && preg_match('/(?:\+?251|\b0)(9\d{8})\b/', $m2[1], $m3)) $out['phone'] = $m3[1]; // only an unmasked sender number
     $tm = '(?:[ T,]+(?:at\s*)?(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)?)?';
     $y = $mo = $d = 0; $hh = $mi = $ss = 0; $ap = '';
     if (preg_match('/(\d{4})[-\/](\d{1,2})[-\/](\d{1,2})' . $tm . '/i', $t, $m)) { [$y, $mo, $d] = [(int)$m[1], (int)$m[2], (int)$m[3]]; }
@@ -194,20 +195,67 @@ function saveDeposit(array $p, string $source, string $by): string {
     if (($p['amount'] ?? 0) <= 0 || ($p['tx_id'] ?? '') === '') return 'invalid';
     $rec = ['amount' => round((float)$p['amount'], 2), 'sender_name' => mb_substr((string)($p['name'] ?? ''), 0, 60), 'tx_id' => $p['tx_id'], 'status' => 'pending',
         'created_at' => ($p['ts'] ?? 0) ?: time(), 'imported_at' => time(), 'source' => $source, 'imported_by' => $by, 'raw' => mb_substr((string)($p['raw'] ?? ''), 0, 500)];
+    if (!empty($p['phone'])) $rec['sender_phone'] = $p['phone'];
+    if (!empty($p['uid'])) { $rec['telegram_id'] = $p['uid']; $rec['claimed_by'] = $p['uid_name'] ?? $p['uid']; }
     $h = []; $c = 0;
     fb('PUT', 'deposits/' . k($p['tx_id']), $rec, [], ['if-match: null_etag'], $h, $c);
     return $c === 200 ? 'saved' : ($c === 412 ? 'duplicate' : 'error');
 }
+/** Players indexed by the last 9 digits of their phone; a number shared by two players maps to false. */
+function phoneIndex(): array {
+    $idx = [];
+    foreach (fbGet('users') ?: [] as $key => $u) {
+        if (!is_array($u) || empty($u['phone'])) continue;
+        $d = substr(preg_replace('/\D/', '', (string)$u['phone']), -9);
+        if (strlen($d) < 9) continue;
+        $idx[$d] = isset($idx[$d]) ? false : [uidOf($key, $u), $u['username'] ?? ($u['first_name'] ?? '')];
+    }
+    return $idx;
+}
+/** Deposits are credited automatically — no admin approval. Runs once per deposit (status compare-and-set). */
+function creditDeposit(string $id, string $by = 'auto'): string {
+    $d = fbGet('deposits/' . k($id)); if (!is_array($d)) return 'missing';
+    $tid = preg_replace('/\D/', '', (string)($d['telegram_id'] ?? '')); $amt = (float)($d['amount'] ?? 0);
+    if ($tid === '' || $amt <= 0) return 'skip';
+    if (!is_array(fbGet('users/' . k($tid)))) return 'nouser';
+    $prev = casStatus('deposits/' . k($id), 'processed', ['processed', 'rejected']);
+    if ($prev === false) return 'skip';
+    if (!adjustBalance($tid, $amt, $after)) { fbPut('deposits/' . k($id) . '/status', $prev); return 'error'; }
+    fbPatch('deposits/' . k($id), ['processed_by' => $by, 'processed_at' => time()]);
+    ledger($tid, 'deposit', $amt, $after, "Deposit $id", $by); syncUserOne($tid);
+    notifyUser($tid, '✅ Your deposit of <b>' . money($amt) . ' ETB</b> was received. Balance: <b>' . money($after) . ' ETB</b>');
+    audit('deposit.auto', "$id · " . money($amt) . " ETB → player $tid");
+    return 'credited';
+}
+function autoCreditDeposits(array $deposits, string $by = 'auto'): int {
+    $n = 0;
+    foreach ($deposits as $id => $d) {
+        if (!is_array($d) || ($d['status'] ?? 'pending') !== 'pending' || empty($d['telegram_id'])) continue;
+        if (creditDeposit((string)$id, $by) === 'credited') $n++;
+    }
+    return $n;
+}
 function importFrom($raw, string $source, string $by, array $existing): array {
-    $r = ['saved' => 0, 'duplicate' => 0, 'invalid' => 0, 'error' => 0];
+    $r = ['saved' => 0, 'duplicate' => 0, 'invalid' => 0, 'error' => 0, 'credited' => 0]; $idx = null;
     foreach ((array)$raw as $rec) {
         if (is_array($rec) && isset($rec['balance_after'])) continue; // wallet history, not a payment
         $p = txnFromRecord($rec);
         if ($p['amount'] <= 0 || $p['tx_id'] === '') { $r['invalid']++; continue; }
         if (isset($existing[$p['tx_id']])) { $r['duplicate']++; continue; }
+        if ($p['phone'] !== '') { // sender's full phone matches exactly one player → link automatically
+            $idx = $idx ?? phoneIndex();
+            if (!empty($idx[$p['phone']])) { $p['uid'] = $idx[$p['phone']][0]; $p['uid_name'] = $idx[$p['phone']][1]; }
+        }
         $res = saveDeposit($p, $source, $by); $r[$res]++;
         if ($res === 'saved' || $res === 'duplicate') $existing[$p['tx_id']] = true;
+        if ($res === 'saved' && !empty($p['uid']) && creditDeposit($p['tx_id'], 'auto') === 'credited') $r['credited']++;
     }
+    return $r;
+}
+/** Import new payments, then credit every linked pending deposit. */
+function runAutoImport($raw, string $source, string $by, array $deposits): array {
+    $r = importFrom($raw, $source, $by, $deposits);
+    $r['credited'] += autoCreditDeposits(array_filter(fbGet('deposits') ?: [], 'is_array'));
     return $r;
 }
 function saveMsg(string $res, string $id): array {
@@ -240,9 +288,9 @@ function audit(string $action, string $detail = ''): void {
     global $ME;
     fb('POST', 'admin_logs', ['by' => $ME['username'] ?? '?', 'role' => $ME['role'] ?? '', 'action' => $action, 'detail' => $detail, 'ip' => $_SERVER['REMOTE_ADDR'] ?? '', 'at' => time()]);
 }
-function ledger(string $uid, string $type, float $amount, float $after, string $note = ''): void {
+function ledger(string $uid, string $type, float $amount, float $after, string $note = '', ?string $by = null): void {
     global $ME;
-    fb('POST', 'wallet_ledger', ['telegram_id' => $uid, 'type' => $type, 'amount' => $amount, 'balance_after' => $after, 'note' => $note, 'by' => $ME['username'] ?? '', 'at' => time()]);
+    fb('POST', 'wallet_ledger', ['telegram_id' => $uid, 'type' => $type, 'amount' => $amount, 'balance_after' => $after, 'note' => $note, 'by' => $by ?? ($ME['username'] ?? ''), 'at' => time()]);
 }
 function segmentUsers(array $users, string $seg): array {
     $out = [];
@@ -319,8 +367,9 @@ if (!empty($_SESSION['aid'])) {
 
 if (isset($_GET['cron']) && getenv('CRON_KEY') && hash_equals((string)getenv('CRON_KEY'), (string)($_GET['key'] ?? ''))) {
     $ME = ['username' => 'cron', 'role' => 'system'];
-    $res = importFrom(fbGet('transactions', ['orderBy' => '"$key"', 'limitToLast' => 300]) ?: [], 'sms-auto', 'cron', fbGet('deposits') ?: []);
-    if ($res['saved']) audit('import.cron', json_encode($res));
+    $SET = array_merge(settingsDefaults(), fbGet('settings') ?: []);
+    $res = runAutoImport(fbGet('transactions', ['orderBy' => '"$key"', 'limitToLast' => 300]) ?: [], 'sms-auto', 'cron', fbGet('deposits') ?: []);
+    if ($res['saved'] || $res['credited']) audit('import.cron', json_encode($res));
     header('Content-Type: application/json'); echo json_encode($res); exit;
 }
 
@@ -392,24 +441,6 @@ if ($ME && $POST) {
         if (is_array($u) && !empty($u['phone'])) fbDel('userone/' . preg_replace('/[.#$\[\]\/]/', '_', (string)$u['phone']));
         fbDel('users/' . k($uid)); audit('player.delete', $uid); flash('Player deleted.'); go('users');
 
-    case 'process_deposit':
-        need('deposits.process');
-        $id = (string)($_POST['tx_id'] ?? ''); $to = ($_POST['status'] ?? '') === 'rejected' ? 'rejected' : 'processed';
-        $d = fbGet('deposits/' . k($id)); if (!is_array($d)) { flash('Deposit not found.', 'bad'); back(); }
-        $amt = (float)($d['amount'] ?? 0);
-        if ($to === 'processed' && $lim > 0 && $amt > $lim) { flash('This deposit is above your limit of ' . money($lim) . ' ETB.', 'bad'); back(); }
-        $prev = casStatus('deposits/' . k($id), $to, ['processed']);
-        if ($prev === false) { flash('Already processed — nothing changed.', 'warn'); back(); }
-        fbPatch('deposits/' . k($id), ['processed_by' => $ME['username'], 'processed_at' => time()]);
-        $tid = preg_replace('/\D/', '', (string)($d['telegram_id'] ?? ''));
-        if ($to === 'processed' && $tid !== '') {
-            if (!adjustBalance($tid, $amt, $after)) { fbPut('deposits/' . k($id) . '/status', $prev); flash('Could not credit the player. Deposit left as ' . $prev . '.', 'bad'); back(); }
-            ledger($tid, 'deposit', $amt, $after, "Deposit $id"); syncUserOne($tid);
-            notifyUser($tid, '✅ Your deposit of <b>' . money($amt) . ' ETB</b> was approved. Balance: <b>' . money($after) . ' ETB</b>');
-        } elseif ($to === 'rejected' && $tid !== '') notifyUser($tid, '❌ Your deposit <code>' . e($id) . '</code> could not be verified and was rejected.');
-        audit('deposit.' . $to, "$id · " . money($amt) . ' ETB');
-        flash($to === 'processed' ? ($tid === '' ? 'Approved, but the deposit has no player ID — balance NOT changed.' : 'Deposit approved and credited.') : 'Deposit rejected.', $to === 'processed' && $tid === '' ? 'warn' : 'ok'); back();
-
     case 'process_withdrawal':
         need('withdrawals.process');
         $id = (string)($_POST['wdr_id'] ?? ''); $to = ($_POST['status'] ?? '') === 'rejected' ? 'rejected' : 'approved'; $why = trim((string)($_POST['reason'] ?? ''));
@@ -452,16 +483,15 @@ if ($ME && $POST) {
 
     case 'import_all':
         need('transactions.import');
-        $r = importFrom(fbGet('transactions', ['orderBy' => '"$key"', 'limitToLast' => 300]) ?: [], 'sms-auto', $ME['username'], fbGet('deposits') ?: []);
+        $r = runAutoImport(fbGet('transactions', ['orderBy' => '"$key"', 'limitToLast' => 300]) ?: [], 'sms-auto', $ME['username'], fbGet('deposits') ?: []);
         audit('import.all', json_encode($r));
-        flash("Saved {$r['saved']} new deposit(s) · already saved {$r['duplicate']} · unreadable {$r['invalid']}.", $r['saved'] ? 'ok' : 'warn'); back();
+        flash("Saved {$r['saved']} new · credited {$r['credited']} automatically · already saved {$r['duplicate']} · unreadable {$r['invalid']}.", $r['saved'] || $r['credited'] ? 'ok' : 'warn'); back();
 
     case 'import_one':
         need('transactions.import');
-        $rec = fbGet('transactions/' . k((string)($_POST['key'] ?? ''))); $p = txnFromRecord($rec);
-        $res = $rec === null ? 'invalid' : saveDeposit($p, 'sms-auto', $ME['username']);
-        if ($res === 'saved') audit('import.one', $p['tx_id']);
-        [$m, $t] = saveMsg($res, $p['tx_id']); flash($m, $t); back();
+        $key = (string)($_POST['key'] ?? ''); $rec = fbGet('transactions/' . k($key));
+        $r = runAutoImport($rec === null ? [] : [$key => $rec], 'sms-auto', $ME['username'], fbGet('deposits') ?: []);
+        flash($r['saved'] ? 'Saved to deposits' . ($r['credited'] ? ' and credited to the player.' : ' — waiting for a player to claim it.') : ($r['duplicate'] ? 'That transaction number already exists.' : 'Could not read an amount and a transaction number.'), $r['saved'] ? 'ok' : 'warn'); back();
 
     case 'extract_manual':
         need('transactions.import'); $txt = trim((string)($_POST['text'] ?? ''));
@@ -475,11 +505,17 @@ if ($ME && $POST) {
 
     case 'save_manual':
         need('transactions.import');
+        $tid = preg_replace('/\D/', '', (string)($_POST['tid'] ?? '')); $pl = $tid !== '' ? fbGet('users/' . k($tid)) : null;
+        if ($tid !== '' && !is_array($pl)) { flash('No player with that Telegram ID.', 'bad'); back(); }
         $p = ['amount' => round((float)($_POST['amount'] ?? 0), 2), 'name' => trim((string)($_POST['name'] ?? '')), 'tx_id' => normTxId((string)($_POST['tx_id'] ?? '')),
-            'ts' => (int)strtotime((string)($_POST['when'] ?? '')), 'raw' => (string)($_POST['raw'] ?? '')];
-        $res = saveDeposit($p, 'manual', $ME['username']);
-        if ($res === 'saved') { unset($_SESSION['txn_preview']); audit('deposit.manual', $p['tx_id'] . ' · ' . money($p['amount']) . ' ETB'); }
-        [$m, $t] = saveMsg($res, $p['tx_id']); flash($m, $t); back();
+            'ts' => (int)strtotime((string)($_POST['when'] ?? '')), 'raw' => (string)($_POST['raw'] ?? ''), 'uid' => $tid, 'uid_name' => is_array($pl) ? ($pl['username'] ?? ($pl['first_name'] ?? $tid)) : ''];
+        $res = saveDeposit($p, 'manual', $ME['username']); $cr = '';
+        if ($res === 'saved') {
+            unset($_SESSION['txn_preview']); audit('deposit.manual', $p['tx_id'] . ' · ' . money($p['amount']) . ' ETB');
+            if ($tid !== '') $cr = creditDeposit($p['tx_id'], 'auto');
+        }
+        [$m, $t] = saveMsg($res, $p['tx_id']);
+        flash($cr === 'credited' ? "Deposit {$p['tx_id']} saved and " . money($p['amount']) . ' ETB credited to the player.' : $m, $t); back();
 
     case 'link_deposit':
         need('deposits.process'); $id = (string)($_POST['tx_id'] ?? ''); $tid = preg_replace('/\D/', '', (string)($_POST['tid'] ?? ''));
@@ -487,7 +523,8 @@ if ($ME && $POST) {
         if (!is_array($d) || !is_array($u)) { flash('Deposit or player not found.', 'bad'); back(); }
         if (($d['status'] ?? '') === 'processed') { flash('Already approved.', 'warn'); back(); }
         fbPatch('deposits/' . k($id), ['telegram_id' => $tid, 'claimed_by' => $u['username'] ?? ($u['first_name'] ?? $tid)]);
-        audit('deposit.link', "$id → $tid"); flash('Deposit linked to ' . ($u['first_name'] ?? 'player') . '.'); back();
+        $cr = creditDeposit($id, 'auto'); audit('deposit.link', "$id → $tid");
+        flash($cr === 'credited' ? 'Linked — ' . money($d['amount'] ?? 0) . ' ETB credited to ' . ($u['first_name'] ?? 'the player') . '.' : 'Linked to ' . ($u['first_name'] ?? 'the player') . '.', $cr === 'credited' ? 'ok' : 'warn'); back();
 
     case 'toggle_game':
         need('settings.manage'); $on = ($_POST['value'] ?? '') === '1';
@@ -554,7 +591,7 @@ $nav = [
     'broadcast'   => ['📢', 'Broadcast', 'ብሮድካስት', 'broadcast.send'],
     'settings'    => ['🎛️', 'Game settings', 'ቅንብር', 'settings.manage'],
     'logs'        => ['🧾', 'Audit & ledger', 'ታሪክ', 'logs.view'],
-    'admins'      => ['🛡️', 'Admins & roles', 'አስተዳዳሪዎች', 'admins.manage'],
+    'admins'      => ['🛡️', 'Add admin & roles', 'አድሚን ጨምር', 'admins.manage'],
 ];
 $tab = $_GET['tab'] ?? 'dashboard';
 $tabKey = $tab === 'user' ? 'users' : $tab;
@@ -571,11 +608,12 @@ if ($ME) {
     $txRaw = []; $autoRes = null;
     if ($tab === 'transactions') {
         $txRaw = fbGet('transactions', ['orderBy' => '"$key"', 'limitToLast' => 300]) ?: [];
-        if (can('transactions.import')) { // auto-extract anything new every time this page is opened
-            $autoRes = importFrom($txRaw, 'sms-auto', $ME['username'], $deposits);
-            if ($autoRes['saved']) { audit('import.auto', json_encode($autoRes)); $deposits = array_filter(fbGet('deposits') ?: [], 'is_array'); uasort($deposits, $byTime); }
+        if (can('transactions.import')) { // auto-extract + auto-credit every time this page is opened
+            $autoRes = runAutoImport($txRaw, 'sms-auto', $ME['username'], $deposits);
+            if ($autoRes['saved'] || $autoRes['credited']) { audit('import.auto', json_encode($autoRes)); $deposits = array_filter(fbGet('deposits') ?: [], 'is_array'); uasort($deposits, $byTime); }
         }
     }
+    if ($tab === 'deposits' && autoCreditDeposits($deposits)) { $deposits = array_filter(fbGet('deposits') ?: [], 'is_array'); uasort($deposits, $byTime); }
 }
 $perPage = 25;
 $roles = roleList(); $perms = permList();
@@ -714,7 +752,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
 <?php /* ═════════ DASHBOARD ═════════ */ if ($tab === 'dashboard'):
     $totBal = 0; $banned = 0; $vips = 0;
     foreach ($users as $u) { $totBal += (float)($u['balance'] ?? 0); $banned += !empty($u['banned']); $vips += !empty($u['vip']); }
-    $pd = array_filter($deposits, function ($d) { return !in_array($d['status'] ?? 'pending', ['processed', 'rejected'], true); });
+    $pd = array_filter($deposits, function ($d) { return !in_array($d['status'] ?? 'pending', ['processed', 'rejected'], true) && empty($d['telegram_id']); });
     $pw = array_filter($withdrawals, function ($w) { return ($w['status'] ?? 'pending') === 'pending'; });
     $pdSum = array_sum(array_map(function ($d) { return (float)($d['amount'] ?? 0); }, $pd));
     $pwSum = array_sum(array_map(function ($w) { return (float)($w['amount'] ?? 0); }, $pw));
@@ -727,7 +765,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
   <div class="grid g5">
     <a class="stat" href="admin.php?tab=users"><div class="ball">B</div><div><p>Players</p><strong><?= count($users) ?></strong><em><?= $vips ?> VIP · <?= $banned ?> banned</em></div></a>
     <div class="stat"><div class="ball">I</div><div><p>Player balances</p><strong><?= money($totBal) ?></strong><em>ETB held in wallets</em></div></div>
-    <a class="stat <?= $pd ? 'alert' : '' ?>" href="admin.php?tab=deposits&s=pending"><div class="ball">N</div><div><p>Deposits to review</p><strong><?= count($pd) ?></strong><em><?= money($pdSum) ?> ETB</em></div></a>
+    <a class="stat <?= $pd ? 'alert' : '' ?>" href="admin.php?tab=deposits&s=pending"><div class="ball">N</div><div><p>Deposits waiting for a player</p><strong><?= count($pd) ?></strong><em><?= money($pdSum) ?> ETB</em></div></a>
     <a class="stat <?= $pw ? 'alert' : '' ?>" href="admin.php?tab=withdrawals&s=pending"><div class="ball">G</div><div><p>Withdrawals to pay</p><strong><?= count($pw) ?></strong><em><?= money($pwSum) ?> ETB</em></div></a>
     <div class="stat"><div class="ball">O</div><div><p>Net today</p><strong><?= money($today['in'] - $today['out']) ?></strong><em><?= money($today['in']) ?> in · <?= money($today['out']) ?> out</em></div></div>
   </div>
@@ -831,6 +869,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
 ?>
   <div class="card">
     <div class="tabs"><?php foreach (['all' => 'All', 'pending' => 'Pending', 'processed' => 'Approved', 'rejected' => 'Rejected'] as $v => $l): ?><a class="<?= $s === $v ? 'on' : '' ?>" href="admin.php?tab=deposits&s=<?= $v ?>"><?= $l ?></a><?php endforeach; ?></div>
+    <p class="muted" style="font-size:13.5px;margin-bottom:12px">Deposits are credited automatically as soon as they belong to a player — no approval needed. Link a waiting deposit to a player below and it is credited immediately.</p>
     <div class="toolbar"><input data-filter="#dt" placeholder="Search transaction or username"><?php if (can('export.data')): ?><a class="btn iconbtn" href="admin.php?export=deposits" style="background:var(--surface);color:var(--ink)">⬇ Export CSV</a><?php endif; ?></div>
     <div class="tbl"><table id="dt"><tr><th>Transaction</th><th>Player</th><th>Amount</th><th>Status</th><th></th></tr>
       <?php foreach ($list as $id => $d): $st = $d['status'] ?? 'pending'; ?>
@@ -838,9 +877,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
           <td><?php if (!empty($d['telegram_id']) && can('users.view')): ?><a href="admin.php?tab=user&id=<?= e(preg_replace('/\D/', '', (string)$d['telegram_id'])) ?>">@<?= e($d['claimed_by'] ?? $d['telegram_id']) ?></a><?php else: ?><?= !empty($d['claimed_by']) ? '@' . e($d['claimed_by']) : '<small>Unlinked</small>' ?><?php endif; ?><?php if (!empty($d['sender_name'])): ?><br><small>Sender: <?= e($d['sender_name']) ?></small><?php endif; ?><?php if (empty($d['telegram_id']) && $st !== 'processed' && can('deposits.process')): ?><form method="POST" class="row" style="margin-top:6px"><?= csrf() ?><input type="hidden" name="action" value="link_deposit"><input type="hidden" name="tx_id" value="<?= e($id) ?>"><input name="tid" inputmode="numeric" placeholder="Player Telegram ID" required style="width:150px;padding:5px 8px"><button class="sm ghost">Link</button></form><?php endif; ?></td>
           <td class="num"><?= money($d['amount'] ?? 0) ?> ETB</td>
           <td><?= chip($st) ?><?php if (!empty($d['processed_by'])): ?><br><small>by <?= e($d['processed_by']) ?></small><?php endif; ?></td>
-          <td><?php if (can('deposits.process') && $st !== 'processed'): ?><div class="row">
-            <form method="POST" data-confirm="Approve and credit <?= money($d['amount'] ?? 0) ?> ETB?"><?= csrf() ?><input type="hidden" name="action" value="process_deposit"><input type="hidden" name="tx_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="processed"><button class="sm ok">Approve</button></form>
-            <?php if ($st !== 'rejected'): ?><form method="POST" data-confirm="Reject this deposit?"><?= csrf() ?><input type="hidden" name="action" value="process_deposit"><input type="hidden" name="tx_id" value="<?= e($id) ?>"><input type="hidden" name="status" value="rejected"><button class="sm bad">Reject</button></form><?php endif; ?></div><?php endif; ?></td></tr>
+          <td><small class="muted"><?= $st === 'processed' ? 'Credited automatically' : ($st === 'rejected' ? 'Rejected' : (empty($d['telegram_id']) ? 'Waiting for a player' : 'Crediting…')) ?></small></td></tr>
       <?php endforeach; if (!$list): ?><tr><td colspan="5" class="muted">Nothing here.</td></tr><?php endif; ?></table></div>
   </div>
 
@@ -877,7 +914,7 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
     }
     $pv = $_SESSION['txn_preview'] ?? null;
 ?>
-  <?php if ($autoRes !== null): ?><div class="banner">Auto-import ran just now: <b><?= $autoRes['saved'] ?></b> new deposit(s) saved · <?= $autoRes['duplicate'] ?> already in deposits · <?= $autoRes['invalid'] ?> unreadable. Each transaction number is saved only once.</div><?php endif; ?>
+  <?php if ($autoRes !== null): ?><div class="banner">Auto-import ran just now: <b><?= $autoRes['saved'] ?></b> new deposit(s) saved · <b><?= $autoRes['credited'] ?></b> credited to players · <?= $autoRes['duplicate'] ?> already in deposits · <?= $autoRes['invalid'] ?> unreadable. Each transaction number is saved only once.</div><?php endif; ?>
   <div class="grid g2">
     <div class="card"><h3>Add a payment by hand</h3>
       <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="extract_manual">
@@ -890,12 +927,13 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
           <div><label>Transaction number</label><input name="tx_id" value="<?= e($pv['tx_id']) ?>" required></div></div>
         <div class="split"><div><label>Sender name</label><input name="name" value="<?= e($pv['name']) ?>"></div>
           <div><label>Date &amp; time</label><input type="datetime-local" name="when" value="<?= $pv['ts'] ? date('Y-m-d\TH:i', $pv['ts']) : date('Y-m-d\TH:i') ?>"></div></div>
+        <label>Player Telegram ID <span class="muted">(optional — credits them right away)</span></label><input name="tid" inputmode="numeric">
         <div class="row" style="margin-top:14px"><button type="submit" class="ok">Save to deposits</button></div></form>
       <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="clear_preview"><button class="sm ghost" style="margin-top:8px">Clear</button></form>
       <?php endif; ?>
     </div>
     <div class="card"><h3>How import works</h3>
-      <p class="muted" style="font-size:13.5px">Every record in your <code>transactions</code> node is read for the amount, sender name, transaction number and date. New ones are written to <code>deposits/&lt;transaction number&gt;</code> as <b>pending</b>; a number that already exists is never saved twice.</p>
+      <p class="muted" style="font-size:13.5px">Every record in your <code>transactions</code> node is read for the amount, sender name, transaction number and date. New ones are written to <code>deposits/&lt;transaction number&gt;</code>; a number that already exists is never saved twice. As soon as a deposit belongs to a player (their phone matches, they claim it in the bot, or you link it) it is credited automatically — admins only approve withdrawals.</p>
       <p class="muted" style="font-size:13.5px;margin-top:10px">This page imports automatically each time it opens. To import without opening it, set the <code>CRON_KEY</code> environment variable and have a scheduler (for example cron-job.org) call <code>admin.php?cron=import&amp;key=YOUR_CRON_KEY</code> every minute.</p>
       <div class="row" style="margin-top:14px"><?= chip('new') ?> <b><?= $cnt['new'] ?></b> <?= chip('saved') ?> <b><?= $cnt['saved'] ?></b> <?= chip('unreadable') ?> <b><?= $cnt['unreadable'] ?></b> <span class="muted">duplicates: <?= $cnt['duplicate'] ?></span></div>
       <?php if (can('transactions.import')): ?><form method="POST"><?= csrf() ?><input type="hidden" name="action" value="import_all"><button class="sm" type="submit" style="margin-top:14px">Import all new now</button></form><?php endif; ?>
@@ -970,6 +1008,13 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
     $permForm = function (array $have) use ($perms) { foreach ($perms as $pk => $pl) echo '<label><input type="checkbox" name="perms[]" value="' . e($pk) . '" ' . (in_array($pk, $have, true) ? 'checked' : '') . '> ' . e($pl) . '</label>'; };
     $roleOpts = function (string $sel) use ($roles) { foreach ($roles as $rk => $r) echo '<option value="' . e($rk) . '" ' . ($sel === $rk ? 'selected' : '') . '>' . e($r['label']) . ' — ' . e($r['desc']) . '</option>'; };
 ?>
+  <div class="card"><h3>Add admin <small>pick a role, then adjust privileges if needed</small></h3>
+    <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="add_admin">
+      <div class="split"><div><label>Username</label><input name="username" required pattern="[A-Za-z0-9_.\-]{3,32}"></div><div><label>Password (8+ characters)</label><input type="password" name="password" required minlength="8" autocomplete="new-password"></div></div>
+      <div class="split"><div><label>Role</label><select name="role" data-role-preset><?php $roleOpts('support'); ?></select></div><div><label>Max amount per approval / adjustment (0 = no limit)</label><input type="number" name="limit" min="0" step="0.01" value="0"></div></div>
+      <label>Privileges <span class="muted">— picking a role fills these in; tick or untick to customise</span></label><div class="permgrid"><?php $permForm($roles['support']['perms']); ?></div>
+      <button type="submit">Create admin</button></form></div>
+
   <div class="card"><h3>Team <small><?= count($admins) + 1 ?> accounts</small></h3>
     <div class="tbl"><table><tr><th>Admin</th><th>Role</th><th>Limit / action</th><th>Last sign-in</th><th></th></tr>
       <tr><td><b><?= e(ROOT_USER) ?></b> <small>root</small></td><td>Super admin</td><td>No limit</td><td>—</td><td class="muted">Set by server environment</td></tr>
@@ -985,13 +1030,6 @@ details{border:1px solid var(--line);border-radius:12px;padding:10px 14px;margin
               <button class="sm" type="submit">Save admin</button></form>
             <form method="POST" data-confirm="Delete this admin?" style="margin-top:8px"><?= csrf() ?><input type="hidden" name="action" value="delete_admin"><input type="hidden" name="id" value="<?= e($id) ?>"><button class="sm bad" type="submit">Delete admin</button></form></details></td></tr>
       <?php endforeach; ?></table></div></div>
-
-  <div class="card"><h3>Add admin</h3>
-    <form method="POST"><?= csrf() ?><input type="hidden" name="action" value="add_admin">
-      <div class="split"><div><label>Username</label><input name="username" required pattern="[A-Za-z0-9_.\-]{3,32}"></div><div><label>Password (8+ characters)</label><input type="password" name="password" required minlength="8" autocomplete="new-password"></div></div>
-      <div class="split"><div><label>Role</label><select name="role" data-role-preset><?php $roleOpts('support'); ?></select></div><div><label>Max amount per approval / adjustment (0 = no limit)</label><input type="number" name="limit" min="0" step="0.01" value="0"></div></div>
-      <label>Privileges <span class="muted">— picking a role fills these in; tick or untick to customise</span></label><div class="permgrid"><?php $permForm($roles['support']['perms']); ?></div>
-      <button type="submit">Create admin</button></form></div>
 
   <div class="card"><h3>What each role can do</h3><div class="tbl"><table>
     <tr><th>Privilege</th><?php foreach ($roles as $r): ?><th><?= e($r['label']) ?></th><?php endforeach; ?></tr>
