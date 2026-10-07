@@ -11,7 +11,7 @@ session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, '
 session_start();
 date_default_timezone_set('Africa/Addis_Ababa');
 
-define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '');
+define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '8605292135:AAEghPf8D6fmTNHIJsRFktyIWd52B0ekSPE');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
 define('BASE_FIREBASE', rtrim(getenv('BASE_FIREBASE') ?: 'https://lalabingobot-default-rtdb.firebaseio.com', '/') . '/');
 define('FIREBASE_AUTH', getenv('FIREBASE_AUTH') ?: '');
