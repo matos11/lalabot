@@ -7,8 +7,8 @@ session_set_cookie_params(['lifetime' => 0, 'path' => '/', 'httponly' => true, '
 session_start();
 date_default_timezone_set('Africa/Addis_Ababa');
 
-define('BOT_TOKEN', getenv('BOT_TOKEN') ?: '');
-define('ADMIN_BOT_TOKEN', getenv('ADMIN_BOT_TOKEN') ?: getenv('BOT_TOKEN') ?: '');
+define('BOT_TOKEN', getenv('8605292135:AAEghPf8D6fmTNHIJsRFktyIWd52B0ekSPE') ?: '');
+define('ADMIN_BOT_TOKEN', getenv('8764719227:AAFgOaMBxMPz8dFyTIfFolSvD3Ryca-abm0') ?: getenv('BOT_TOKEN') ?: '');
 // Example default with 3 admin chat IDs separated by commas (change these to your actual IDs)
 define('ADMIN_CHAT_ID', getenv('ADMIN_CHAT_ID') ?: '1858412022,1791621405,555444333');
 define('GAME_URL', getenv('GAME_URL') ?: 'https://lalabingobot.vercel.app/');
